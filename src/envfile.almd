@@ -1,0 +1,48 @@
+// .env loading: values are literal, nothing is expanded, and an existing
+// environment variable always wins over the file. Returns the names loaded,
+// never the values.
+
+import fs
+import env
+
+fn parse_env(text: String) -> List[(String, String)] = {
+  var out: List[(String, String)] = []
+  for line in string.split(text, "\n") {
+    let s = string.trim(line)
+    if s != "" and not string.starts_with(s, "#") then {
+      match string.split_once(s, "=") {
+        some((k, v)) => {
+          let key = string.trim(string.strip_prefix(string.trim(k), "export ") ?? string.trim(k))
+          var val = string.trim(v)
+          if string.len(val) > 1 and ((string.starts_with(val, "\"") and string.ends_with(val, "\"")) or (string.starts_with(val, "'") and string.ends_with(val, "'")))
+          then val = string.slice(val, 1, string.len(val) - 1) else ()
+          if key != "" then list.push(out, (key, val)) else ()
+        },
+        none => (),
+      }
+    } else ()
+  }
+  out
+}
+
+effect fn load(dirs: List[String]) -> List[String] = {
+  var loaded: List[String] = []
+  var seen: List[String] = []
+  for dir in dirs {
+    let p = dir + "/.env"
+    if not list.contains(seen, p) and fs.exists(p) then {
+      list.push(seen, p)
+      match fs.read_text(p) {
+        err(_) => (),
+        ok(text) => for (k, v) in parse_env(text) {
+          if (env.get(k) ?? "") == "" then { env.set(k, v); list.push(loaded, k) } else ()
+        },
+      }
+    } else ()
+  }
+  loaded
+}
+
+test "parse_env: quotes, export, comments" {
+  assert_eq(parse_env("# c\nexport A=1\nB=\"two words\"\nC='x'\n\nD=\n"), [("A", "1"), ("B", "two words"), ("C", "x"), ("D", "")])
+}

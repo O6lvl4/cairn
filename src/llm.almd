@@ -1,0 +1,264 @@
+// The model call, spoken directly to Cloudflare Workers AI.
+//
+// Everything famulus5 measured is kept:
+//   - streamed, always: a non-streamed request past ~4 minutes is ended
+//     by the provider with `408 Request timeout`; streaming ran 22 min fine
+//   - usage from the stream's final chunk (mid-stream chunks carry partial
+//     usage); cost from `neurons` when present, else the price table
+//   - "finish_reason=length with empty content" is an error naming the
+//     remedy, never an empty answer that silently escalates
+// Error messages keep the shapes ask.almd classifies on: `status NNN:`,
+// `Request timeout`, `truncated before any content`.
+
+import http
+import json
+import env
+import regex
+import datetime
+
+type Price = { input: Float, output: Float, cached: Float }        // USD per Mtok
+type ModelInfo = { short: String, cf_id: String, price: Price }
+
+let NEURON_USD = 0.011 / 1000.0
+
+let MODELS_TABLE = [
+  ModelInfo { short: "gemma-4-26b", cf_id: "@cf/google/gemma-4-26b-a4b-it", price: Price { input: 0.1, output: 0.3, cached: 0.1 } },
+  ModelInfo { short: "glm-5.3-flash", cf_id: "@cf/zai-org/glm-5.3-flash", price: Price { input: 0.15, output: 0.5, cached: 0.03 } },
+  ModelInfo { short: "deepseek-v4-flash-0731", cf_id: "@cf/deepseek-ai/deepseek-v4-flash-0731", price: Price { input: 0.44, output: 1.32, cached: 0.014 } },
+  ModelInfo { short: "glm-5.3", cf_id: "@cf/zai-org/glm-5.3", price: Price { input: 1.4, output: 4.4, cached: 0.26 } },
+]
+
+fn short_of(model: String) -> String = string.strip_prefix(model, "cf:") ?? model
+
+// `cf:glm-5.3-flash` → `@cf/zai-org/glm-5.3-flash`; an unknown name passes through as `@cf/<name>`.
+fn cf_id_of(model: String) -> String = {
+  let short = short_of(model)
+  match list.find(MODELS_TABLE, (m) => m.short == short) {
+    some(m) => m.cf_id,
+    none => if string.starts_with(short, "@cf/") then short else "@cf/" + short,
+  }
+}
+
+fn price_of(model: String) -> Price? = {
+  let short = short_of(model)
+  option.map(list.find(MODELS_TABLE, (m) => m.short == short), (m) => m.price)
+}
+
+type Credentials = { account_id: String, token: String, email: String, key: String }
+
+// A scoped token wins over a Global API Key when both are set. None when
+// nothing usable is in the environment (values are never printed).
+effect fn credentials_from_env() -> Credentials? = {
+  let account = string.trim(env.get("CLOUDFLARE_ACCOUNT_ID") ?? "")
+  let token = string.trim(env.get("CLOUDFLARE_API_TOKEN") ?? "")
+  let email = string.trim(env.get("CLOUDFLARE_EMAIL") ?? "")
+  let key = string.trim(env.get("CLOUDFLARE_API_KEY") ?? "")
+  if account == "" then none
+  else if token != "" then some(Credentials { account_id: account, token: token, email: "", key: "" })
+  else if email != "" and key != "" then some(Credentials { account_id: account, token: "", email: email, key: key })
+  else none
+}
+
+fn endpoint_for(account_id: String) -> String =
+  "https://api.cloudflare.com/client/v4/accounts/" + account_id + "/ai/v1/chat/completions"
+
+type Request = { prompt: String, system: String, model: String, max_output_tokens: Int, reasoning_effort: String, schema: Value? }
+type Response = { text: String, cost_usd: Float, input_tokens: Int, output_tokens: Int, duration_ms: Int }
+
+fn build_body(req: Request) -> String = {
+  var messages: List[Value] = []
+  if req.system != "" then list.push(messages, value.object([("role", value.str("system")), ("content", value.str(req.system))])) else ()
+  list.push(messages, value.object([("role", value.str("user")), ("content", value.str(req.prompt))]))
+  var fields: List[(String, Value)] = [
+    ("model", value.str(cf_id_of(req.model))),
+    ("messages", value.array(messages)),
+    ("stream", value.bool(true)),
+    ("max_completion_tokens", value.int(req.max_output_tokens)),
+    ("reasoning_effort", value.str(req.reasoning_effort)),
+  ]
+  match req.schema {
+    some(s) => list.push(fields, ("response_format", value.object([
+      ("type", value.str("json_schema")),
+      ("json_schema", value.object([("name", value.str("extract")), ("strict", value.bool(true)), ("schema", s)]))]))),
+    none => (),
+  }
+  json.stringify(value.object(fields))
+}
+
+fn headers_for(creds: Credentials) -> Map[String, String] = {
+  var h: Map[String, String] = [:]
+  map.insert(h, "Content-Type", "application/json")
+  if creds.token != "" then map.insert(h, "Authorization", "Bearer " + creds.token)
+  else { map.insert(h, "X-Auth-Email", creds.email); map.insert(h, "X-Auth-Key", creds.key) }
+  h
+}
+
+type Completion = { content: String, reasoning: String, finish: String, usage: Value? }
+
+fn ok_of(r: Result[Value, String]) -> Value? = match r { ok(v) => some(v), err(_) => none }
+fn first_some(a: String?, b: String?) -> String? = match a { some(_) => a, none => b }
+
+fn num(v: Value?, key: String) -> Int = match v {
+  some(u) => match json.get_int(u, key) { some(n) => n, none => float.to_int(json.get_float(u, key) ?? 0.0) },
+  none => 0,
+}
+
+// Fold a chat-completion SSE stream back into one completion: `data: {chunk}`
+// lines ending in `data: [DONE]`; usage from the chunk with the most
+// completion tokens; content and reasoning appended from each delta.
+fn assemble_stream(sse: String) -> Result[Completion, String] = {
+  var content: List[String] = []
+  var reasoning: List[String] = []
+  var finish = ""
+  var usage: Value? = none
+  var usage_completion = -1
+  var chunks = 0
+  var failure = ""
+  for line in string.split(sse, "\n") {
+    let payload = if string.starts_with(line, "data:") then string.trim(string.drop(line, 5)) else ""
+    if failure == "" and payload != "" and payload != "[DONE]" then {
+      match json.parse(payload) {
+        err(e) => { failure = "decode stream chunk: " + e + "; raw: " + string.take(payload, 200) },
+        ok(chunk) => {
+          match value.field(chunk, "error") { ok(e) => { failure = "api error in stream: " + json.stringify(e) }, err(_) => () }
+          match value.field(chunk, "errors") { ok(e) => { failure = "api error in stream: " + json.stringify(e) }, err(_) => () }
+          chunks = chunks + 1
+          let choice = option.map(json.get_array(chunk, "choices"), (cs) => list.first(cs)) |> option.flatten
+          match choice {
+            some(c) => {
+              match value.field(c, "delta") {
+                ok(delta) => {
+                  match json.get_string(delta, "content") { some(s) => list.push(content, s), none => () }
+                  match first_some(json.get_string(delta, "reasoning_content"), json.get_string(delta, "reasoning")) { some(s) => list.push(reasoning, s), none => () }
+                },
+                err(_) => (),
+              }
+              match json.get_string(c, "finish_reason") { some(f) => { finish = f }, none => () }
+            },
+            none => (),
+          }
+          match value.field(chunk, "usage") {
+            ok(u) => {
+              let completion = num(some(u), "completion_tokens")
+              if completion >= usage_completion then { usage_completion = completion; usage = some(u) } else ()
+            },
+            err(_) => (),
+          }
+        },
+      }
+    } else ()
+  }
+  if failure != "" then err(failure)
+  else if chunks == 0 then err("empty stream: no data chunks")
+  else ok(Completion { content: string.join(content, ""), reasoning: string.join(reasoning, ""), finish: finish, usage: usage })
+}
+
+// The non-streamed shape, for a provider that ignores `stream`.
+fn parse_completion(body: String) -> Result[Completion, String] = {
+  let j = json.parse(body)!
+  match option.map(ok_of(value.field(j, "error")), (e) => json.stringify(e)) {
+    some(e) => err("api error: " + e),
+    none => {
+      let choice = option.map(json.get_array(j, "choices"), (cs) => list.first(cs)) |> option.flatten
+      match choice {
+        none => err("no choices in response"),
+        some(c) => {
+          let message = ok_of(value.field(c, "message"))
+          let content = option.map(message, (m) => json.get_string(m, "content") ?? "") ?? ""
+          let reasoning = option.map(message, (m) => first_some(json.get_string(m, "reasoning_content"), json.get_string(m, "reasoning")) ?? "") ?? ""
+          ok(Completion { content: content, reasoning: reasoning, finish: json.get_string(c, "finish_reason") ?? "", usage: ok_of(value.field(j, "usage")) })
+        },
+      }
+    },
+  }
+}
+
+// Turn a completion into the response the loop uses, or the error it must see.
+fn settle(c: Completion, model: String, duration_ms: Int) -> Result[Response, String] = {
+  if c.finish == "length" and string.trim(c.content) == "" then {
+    let reasoned = if string.trim(c.reasoning) != "" then ", budget consumed by reasoning" else ""
+    err("truncated before any content (finish_reason=length" + reasoned + "); raise max_completion_tokens")
+  } else {
+    let details: Value? = match c.usage { some(u) => ok_of(value.field(u, "prompt_tokens_details")), none => none }
+    let cached = if num(details, "cached_tokens") > 0 then num(details, "cached_tokens")
+      else if num(c.usage, "cached_tokens") > 0 then num(c.usage, "cached_tokens") else num(c.usage, "cache_read_input_tokens")
+    let prompt_tokens = if num(c.usage, "prompt_tokens") > 0 then num(c.usage, "prompt_tokens") else num(c.usage, "input_tokens")
+    let completion_tokens = if num(c.usage, "completion_tokens") > 0 then num(c.usage, "completion_tokens") else num(c.usage, "output_tokens")
+    let input_tokens = int.max(0, prompt_tokens - cached)
+    let neurons = option.map(c.usage, (u) => json.get_float(u, "neurons") ?? float.from_int(json.get_int(u, "neurons") ?? -1)) ?? -1.0
+    let cost = if neurons >= 0.0 then neurons * NEURON_USD
+      else match price_of(model) {
+        some(p) => (float.from_int(input_tokens) * p.input + float.from_int(cached) * p.cached + float.from_int(completion_tokens) * p.output) / 1000000.0,
+        none => 0.0,
+      }
+    ok(Response { text: c.content, cost_usd: cost, input_tokens: input_tokens, output_tokens: completion_tokens, duration_ms: duration_ms })
+  }
+}
+
+// The runtime's OpenAI-compatible SSE helper returns one flat JSON object:
+// {"content", "model", "usage": {prompt_tokens, completion_tokens, total_tokens},
+//  "finish_reason", "tool_calls"}. It drops `neurons` and `reasoning_content`,
+// so cost comes from the price table here. (The lower-level
+// http.request_stream cannot take a capturing callback from Almide code
+// today — its bound is FnMut, the lambda renders as Rc<dyn Fn> — which is
+// why the helper is used even though it keeps less of the stream.)
+fn parse_assembled(body: String) -> Result[Completion, String] = {
+  let j = json.parse(body) |> result.map_err((e) => "decode assembled stream: " + e + "; raw: " + string.take(body, 200))!
+  let content = json.get_string(j, "content") ?? ""
+  let finish = json.get_string(j, "finish_reason") ?? ""
+  if content == "" and finish == "" then err("empty response: " + string.take(body, 300))
+  else ok(Completion { content: content, reasoning: "", finish: finish, usage: ok_of(value.field(j, "usage")) })
+}
+
+// `HTTP 408 …` / `408 Request timeout` / anything naming a status → `status NNN: …`
+fn classify_transport(e: String) -> String = match regex.find("(4\\d\\d|5\\d\\d)", e) {
+  some(code) => "status " + code + ": " + string.take(e, 500),
+  none => "transport: " + string.take(e, 500),
+}
+
+fn base_url_for(account_id: String) -> String =
+  "https://api.cloudflare.com/client/v4/accounts/" + account_id + "/ai/v1"
+
+// One call, streamed end to end by the runtime and folded into a response.
+effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
+  if creds.token == "" then err("a CLOUDFLARE_API_TOKEN is required (the Global API Key is not supported on the streaming path)")
+  else {
+    let t0 = env.millis()
+    match http.openai_streaming_call(base_url_for(creds.account_id), creds.token, build_body(req), (_delta: String) => ()) {
+      err(e) => err(classify_transport(e)),
+      ok(body) => match parse_assembled(body) {
+        err(e) => err(e),
+        ok(c) => settle(c, req.model, env.millis() - t0),
+      },
+    }
+  }
+}
+
+test "assemble_stream folds deltas and keeps the fullest usage" {
+  let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}],\"usage\":{\"completion_tokens\":1}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\",\"reasoning_content\":\"hm\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":10,\"neurons\":50}}\n\ndata: [DONE]\n"
+  let c = assemble_stream(sse)!
+  assert_eq(c.content, "Hello")
+  assert_eq(c.reasoning, "hm")
+  assert_eq(c.finish, "stop")
+  let r = settle(c, "cf:glm-5.3-flash", 5)!
+  assert_eq(r.output_tokens, 2)
+  assert_eq(r.input_tokens, 10)
+  assert(float.abs(r.cost_usd - 50.0 * NEURON_USD) < 0.0000001)
+}
+
+test "a length finish with no content is an error naming the remedy" {
+  let c = Completion { content: "", reasoning: "thinking", finish: "length", usage: none }
+  match settle(c, "cf:glm-5.3-flash", 1) {
+    ok(_) => assert(false),
+    err(e) => assert(string.contains(e, "raise max_completion_tokens")),
+  }
+}
+
+test "model ids and the request body" {
+  assert_eq(cf_id_of("cf:glm-5.3"), "@cf/zai-org/glm-5.3")
+  assert_eq(cf_id_of("@cf/x/y"), "@cf/x/y")
+  assert_eq(cf_id_of("other"), "@cf/other")
+  let body = build_body(Request { prompt: "hi", system: "sys", model: "cf:glm-5.3-flash", max_output_tokens: 10, reasoning_effort: "low", schema: none })
+  assert(string.contains(body, "\"stream\":true"))
+  assert(string.contains(body, "\"role\":\"system\""))
+}

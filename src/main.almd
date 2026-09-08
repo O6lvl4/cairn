@@ -1,0 +1,157 @@
+// agent — observe, then act.
+//
+//   agent solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
+//                      [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
+//   agent observe      [--root DIR] [--verify CMD]
+//   agent llm-test
+
+import env
+import process
+import self.llm
+import self.envfile
+import self.ask
+import self.observe
+import self.solve
+
+let USAGE = """
+agent — observe, then act
+
+  agent solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
+                      [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
+  agent observe       [--root DIR] [--verify CMD]
+  agent llm-test
+
+Options
+  --root DIR      project root (default: cwd)
+  --verify CMD    the command whose exit status defines success; given one, nothing is guessed
+  --attempts N    edit/verify rounds before giving up (default 6)
+  --files N       files read per attempt (default 6)
+  --model M       model id (default cf:glm-5.3-flash)
+  --create        allow creating files that do not exist
+  --quiet         only the final report
+  --files-seen N  paths shown to the model (default 400)
+  --timeout SEC   how long the verify command may take (default 120)
+"""
+
+let VALUED = ["root", "verify", "attempts", "files", "model", "files-seen", "timeout", "task"]
+
+type Args = { cmd: String, rest: List[String], flags: Map[String, String] }
+
+fn parse_args(argv: List[String]) -> Args = {
+  var flags: Map[String, String] = [:]
+  var rest: List[String] = []
+  var i = 1
+  while i < list.len(argv) {
+    let a = list.get(argv, i) ?? ""
+    match string.strip_prefix(a, "--") {
+      some(name) => if list.contains(VALUED, name) then { map.insert(flags, name, list.get(argv, i + 1) ?? ""); i = i + 1 } else map.insert(flags, name, "true"),
+      none => list.push(rest, a),
+    }
+    i = i + 1
+  }
+  Args { cmd: list.get(argv, 0) ?? "", rest: rest, flags: flags }
+}
+
+fn usd(x: Float) -> String = {
+  let micros = float.to_int(x * 1000000.0 + 0.5)
+  "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
+}
+
+effect fn load_env(root: String) -> Unit = {
+  let home = env.get("HOME") ?? ""
+  let _ = envfile.load([root, env.cwd() ?? ".", home + "/workspace/github.com/O6lvl4/_agent", home + "/workspace/github.com/Aid-On/famulus5", home + "/workspace/github.com/Aid-On/famulus4"])!
+  ()
+}
+
+effect fn on_path(bin: String) -> Bool = (observe.run("command -v " + bin, ".", 5000)!).code == 0
+
+// The repository map from gramide when it is installed; "" otherwise.
+effect fn repo_map(root: String, task: String) -> (String, List[String]) =
+  if on_path("gramide")! then {
+    let r = observe.run("gramide map . --budget 1024 --task " + observe.shell_quote(string.take(task, 2000)), root, 60000)!
+    if r.code == 0 then (string.trim_end(r.stdout), []) else ("", ["repo map unavailable: " + string.trim(string.take(r.stderr, 200))])
+  } else ("", ["repo map unavailable: gramide is not on PATH"])
+
+effect fn llm_test() -> Result[Unit, String] = {
+  load_env(".")!
+  let creds = llm.credentials_from_env()! |> option.to_result("no credentials: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN")!
+  let r = llm.invoke(creds, llm.Request { prompt: "Reply with exactly the word OK.", system: "", model: ask.MODEL_WORK, max_output_tokens: 64, reasoning_effort: "low", schema: none })!
+  println("text=" + string.trim(r.text) + " in=" + int.to_string(r.input_tokens) + " out=" + int.to_string(r.output_tokens) + " cost=" + usd(r.cost_usd) + " ms=" + int.to_string(r.duration_ms))
+  ok(())
+}
+
+effect fn run_observe(a: Args) -> Result[Unit, String] = {
+  let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
+  let (rm, rmw) = repo_map(root, string.join(a.rest, " "))!
+  let obs = observe.observe(root, map.get(a.flags, "verify") ?? "", 400, 120000, rm, rmw)!
+  println("root: " + obs.root)
+  println("language: " + (option.map(obs.fingerprint, (f) => f.language + " (" + f.marker + ")") ?? "unknown"))
+  println("verify: " + (if obs.verify_command == "" then "(none)" else obs.verify_command) + " [" + obs.verify_source + "]")
+  println("files: " + int.to_string(list.len(obs.files)))
+  for f in list.take(obs.files, 40) { println("  " + f) }
+  match obs.baseline { some(b) => println("baseline: exit " + int.to_string(b.code) + " in " + int.to_string(b.duration_ms) + "ms"), none => () }
+  if obs.harness_broken != "" then println("harness broken: " + obs.harness_broken) else ()
+  for w in obs.repo_map_warnings { println("warning: " + w) }
+  println("repo map: " + int.to_string(string.len(obs.repo_map)) + " chars")
+  ok(())
+}
+
+// exit 0 solved, 1 not solved, 2 setup error, 3 nothing to do / harness broken
+effect fn run_solve(a: Args) -> Result[Int, String] = {
+  let task = string.trim(string.join(a.rest, " "))
+  let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
+  let quiet = map.contains(a.flags, "quiet")
+  if task == "" then err("solve needs a task description")
+  else solve_with(a, task, root, quiet)
+}
+
+effect fn solve_with(a: Args, task: String, root: String, quiet: Bool) -> Result[Int, String] = {
+  load_env(root)!
+  let creds = llm.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")!
+  let (rm, rmw) = repo_map(root, task)!
+  let obs = observe.observe(root, map.get(a.flags, "verify") ?? "", int.parse(map.get(a.flags, "files-seen") ?? "400") ?? 400,
+    (int.parse(map.get(a.flags, "timeout") ?? "120") ?? 120) * 1000, rm, rmw)!
+  if not quiet then {
+    eprintln("project: " + (option.map(obs.fingerprint, (f) => f.language + " (" + f.marker + ")") ?? "unknown (no marker)") + ", " + int.to_string(list.len(obs.files)) + " files")
+    eprintln("verify:  " + (if obs.verify_command == "" then "(none)" else obs.verify_command) + " [" + obs.verify_source + "]")
+    match obs.baseline { some(b) => eprintln("baseline: exit " + int.to_string(b.code) + " in " + int.to_string(b.duration_ms) + "ms"), none => () }
+    for w in obs.repo_map_warnings { eprintln("warning: " + w) }
+  } else ()
+  if list.is_empty(obs.files) then { eprintln("\nno source files found under " + obs.root + "\n  nothing here can be read, so nothing can be fixed."); ok(3) }
+  else if obs.harness_broken != "" then {
+    eprintln("\nthe verify command did not run: " + obs.harness_broken + "\n  $ " + obs.verify_command + "\n" + (option.map(obs.baseline, (b) => observe.tail(string.trim(b.stdout + "\n" + b.stderr), 10)) ?? "") + "\nFix the command (or the environment) and run again. Nothing the agent writes can change this outcome.")
+    ok(3)
+  }
+  else if option.map(obs.baseline, (b) => b.code == 0) ?? false then { println("\n" + obs.verify_command + " already passes — nothing was changed.\n  If there is work to do here, give a --verify that fails first."); ok(0) }
+  else {
+    let opts = solve.Options { max_attempts: int.parse(map.get(a.flags, "attempts") ?? "6") ?? 6, max_files: int.parse(map.get(a.flags, "files") ?? "6") ?? 6,
+      model: map.get(a.flags, "model") ?? ask.MODEL_WORK, allow_create: map.contains(a.flags, "create"), quiet: quiet }
+    let r = solve.solve(creds, task, obs, opts)!
+    println("\n" + (if r.ok then "SOLVED" else "NOT SOLVED") + " in " + int.to_string(list.len(r.attempts)) + " attempt(s), " + usd(r.cost_usd) + ", " + int.to_string(r.wall_ms / 1000) + "s")
+    if not list.is_empty(r.changed) then println("changed: " + string.join(r.changed, ", ")) else ()
+    for w in r.warnings { println("WARNING: " + w) }
+    if r.harness_broken != "" then println("the verify command stopped working mid-run: " + r.harness_broken + "\nthe edits on disk were never actually checked.")
+    else if not r.ok then {
+      let why = match list.last(r.attempts) {
+        some(last) => if last.apply_error != "" then last.apply_error else match last.verify { some(v) => "verify exited " + int.to_string(v.code), none => "no attempt completed" },
+        none => "no attempt completed",
+      }
+      println("reason: " + why)
+    } else ()
+    ok(if r.ok then 0 else 1)
+  }
+}
+
+effect fn finish(r: Result[Int, String]) -> Unit = match r {
+  ok(code) => if code == 0 then () else process.exit(code),
+  err(e) => { eprintln(e); process.exit(2) },
+}
+
+effect fn main() -> Unit = {
+  let a = parse_args(env.args())
+  if a.cmd == "" or a.cmd == "help" or map.contains(a.flags, "help") then { println(USAGE); process.exit(if a.cmd == "" then 1 else 0) }
+  else if a.cmd == "llm-test" then finish(result.map(llm_test(), (_) => 0))
+  else if a.cmd == "observe" then finish(result.map(run_observe(a), (_) => 0))
+  else if a.cmd == "solve" then finish(run_solve(a))
+  else { eprintln("unknown command: " + a.cmd + "\n" + USAGE); process.exit(1) }
+}

@@ -1,0 +1,221 @@
+// Small, schema-constrained questions to the model, with the retry policy
+// famulus5 measured: transient errors back off, rate limits wait up to a
+// minute, a budget truncation retries with a larger budget, and a provider
+// timeout (408) retries SMALLER — less reasoning and half the budget —
+// because the same generation sent into the same wall times out again.
+
+import env
+import json
+import regex
+import self.llm
+
+let MODEL_TRIAGE = "cf:glm-5.3-flash"
+let MODEL_WORK = "cf:glm-5.3-flash"
+let MODEL_STRONG = "cf:glm-5.3"
+
+type Options = { system: String, model: String, max_output_tokens: Int, reasoning_effort: String }
+
+// (Almide's regex has no case-insensitive flag, no word boundary and no backreference: subjects are lower-cased and
+// patterns written in lower case; word edges are spelled out where needed.)
+fn is_transient(m: String) -> Bool = regex.is_match("status (408|409|425|429|500|502|503|504)([^0-9]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701|request timeout|timed? out|econnreset|etimedout|eai_again|socket hang up", string.to_lower(m))
+fn is_server_timeout(m: String) -> Bool = regex.is_match("status 408([^0-9]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701|request timeout", string.to_lower(m))
+fn is_budget_truncation(m: String) -> Bool = regex.is_match("truncated before any content|raise max_completion_tokens", string.to_lower(m))
+fn is_rate_limit(m: String) -> Bool = regex.is_match("status 429([^0-9]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701|rate limit|too many requests", string.to_lower(m))
+
+let EFFORTS = ["low", "medium", "high"]
+
+// One step less thinking, so the next generation finishes in time.
+fn lower_effort(e: String) -> String = {
+  let i = list.index_of(EFFORTS, e) ?? 0
+  list.get(EFFORTS, int.max(0, i - 1)) ?? "low"
+}
+
+// Whether a JSON answer was cut off rather than finished: finished JSON
+// ends in `}` or `]`; anything else is a generation the budget stopped.
+fn looks_truncated(text: String) -> Bool = {
+  let t = string.trim(regex.replace("```\\s*$", string.trim(text), ""))
+  if not (string.starts_with(t, "{") or string.starts_with(t, "[")) then false
+  // (not a parse attempt: Almide's json.parse accepts an unterminated document)
+  else not (string.ends_with(t, "}") or string.ends_with(t, "]"))
+}
+
+fn strip_fence(s: String) -> String = match regex.captures("```(?:json|jsonc)?\\s*\\n([\\s\\S]*?)```", s) {
+  some(cs) => string.trim(list.get(cs, 1) ?? ""),
+  none => "",
+}
+
+// The outermost {...} or [...] in the string.
+fn slice_braces(s: String) -> String = {
+  let starts = list.filter([string.index_of(s, "{") ?? -1, string.index_of(s, "[") ?? -1], (i) => i >= 0)
+  match list.min(starts) {
+    none => "",
+    some(start) => {
+      let open = string.get(s, start) ?? "{"
+      let close = if open == "{" then "}" else "]"
+      match string.last_index_of(s, close) {
+        some(e) => if e > start then string.slice(s, start, e + 1) else "",
+        none => "",
+      }
+    },
+  }
+}
+
+// `,` followed only by whitespace and a closing bracket is dropped
+fn drop_trailing_commas(s: String) -> String = {
+  let cs = string.chars(s)
+  var out: List[String] = []
+  var i = 0
+  while i < list.len(cs) {
+    let c = list.get(cs, i) ?? ""
+    if c == "," then {
+      var j = i + 1
+      while j < list.len(cs) and string.is_whitespace(list.get(cs, j) ?? "") { j = j + 1 }
+      let nxt = list.get(cs, j) ?? ""
+      if nxt == "}" or nxt == "]" then () else list.push(out, c)
+    } else list.push(out, c)
+    i = i + 1
+  }
+  string.join(out, "")
+}
+
+// Parse JSON from a model, tolerating what models actually emit: a fence,
+// a leading sentence, a trailing comma.
+fn parse_json(raw: String) -> Result[Value, String] = {
+  var found: Value? = none
+  var last = ""
+  for a in [raw, strip_fence(raw), slice_braces(raw)] {
+    if option.is_none(found) and a != "" then {
+      match json.parse(a) {
+        ok(v) => { found = some(v) },
+        err(e) => match json.parse(drop_trailing_commas(a)) {
+          ok(v) => { found = some(v) },
+          err(_) => { last = e },
+        },
+      }
+    } else ()
+  }
+  match found {
+    some(v) => ok(v),
+    none => err("could not parse model output as JSON (" + last + "): " + string.take(raw, 400)),
+  }
+}
+
+// Raw model traffic, on AGENT_DEBUG.
+effect fn debug(label: String, body: String) -> Unit =
+  if (env.get("AGENT_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---") else ()
+
+type Asked = { value: Value, cost_usd: Float }
+
+// what one call produced: an answer, a reason to retry, or a reason to stop
+type Step = | Got(String) | Retry(String)
+
+// 5s, 10s, 20s, 40s, 60s, 60s — enough to outlast a per-minute window
+fn backoff(n: Int) -> Int = {
+  var w = 5000
+  var i = 1
+  while i < n and w < 60000 { w = w * 2; i = i + 1 }
+  int.min(60000, w)
+}
+
+// Ask for a value matching `schema`, and parse it. Constrained decoding on
+// Workers AI enforces shape, not size; callers check arity themselves.
+effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Options) -> Result[Asked, String] = {
+  debug("prompt", prompt)!
+  var budget = o.max_output_tokens
+  var effort = o.reasoning_effort
+  var timed_out = 0
+  var attempt = 0
+  var rate_limited = 0
+  var cost = 0.0
+  // (an Option holding a Result trips the native auto-propagation; the
+  // outcome is kept as two plain vars instead)
+  var finished = false
+  var answer: Value? = none
+  var failure = ""
+  while not finished {
+    // every state change below is a statement: an assignment inside a
+    // match arm whose value is bound by `let` is lost on the native backend
+    let req = llm.Request { prompt: prompt, system: o.system, model: o.model, max_output_tokens: budget, reasoning_effort: effort, schema: some(schema) }
+    let res = llm.invoke(creds, req)
+    var outcome: Step = Retry("")
+    match res {
+      ok(r) => {
+        cost = cost + r.cost_usd
+        if looks_truncated(r.text) and budget < 65536 then {
+          budget = int.min(65536, budget * 3)
+          outcome = Retry("response truncated before any content could be parsed (" + int.to_string(string.len(r.text)) + " chars) [retrying at " + int.to_string(budget) + " output tokens; raise max_completion_tokens]")
+        } else outcome = Got(r.text)
+      },
+      err(m) => {
+        if is_budget_truncation(m) and budget < 65536 then {
+          budget = int.min(65536, budget * 3)
+          outcome = Retry(m + " [retrying at " + int.to_string(budget) + " output tokens]")
+        } else if is_server_timeout(m) then {
+          // less thinking and a smaller budget both shorten the generation;
+          // after two such shrinks a third timeout is the provider's answer
+          timed_out = timed_out + 1
+          if timed_out > 2 then outcome = Retry(m + " [gave up after 2 smaller retries]")
+          else {
+            let before = effort + "/" + int.to_string(budget)
+            effort = lower_effort(effort)
+            budget = int.max(4096, budget / 2)
+            outcome = Retry(m + " [retrying smaller: " + before + " -> " + effort + "/" + int.to_string(budget) + "]")
+          }
+        } else outcome = Retry(m)
+      },
+    }
+    match outcome {
+      Got(text) => {
+        debug("response", text)!
+        match parse_json(text) { ok(v) => { answer = some(v) }, err(e) => { failure = e } }
+        finished = true
+      },
+      Retry(m) => {
+        let gave_up = string.contains(m, "[gave up")
+        if gave_up or not (is_transient(m) or is_budget_truncation(m)) then { failure = m; finished = true }
+        else {
+          var wait_ms = 0
+          var stop = false
+          if is_rate_limit(m) then {
+            rate_limited = rate_limited + 1
+            if rate_limited > 6 then stop = true
+            else wait_ms = backoff(rate_limited) + (env.millis() % 1000)
+          } else if is_budget_truncation(m) or is_server_timeout(m) then {
+            attempt = attempt + 1
+            if attempt >= 5 then stop = true else wait_ms = 0
+          } else {
+            attempt = attempt + 1
+            if attempt >= 3 then stop = true else wait_ms = 2000 * attempt
+          }
+          if stop then { failure = m; finished = true }
+          else {
+            debug("retry", m + "\nretrying in " + int.to_string(wait_ms) + "ms")!
+            env.sleep_ms(wait_ms)
+          }
+        }
+      },
+    }
+  }
+  match answer {
+    some(v) => ok(Asked { value: v, cost_usd: cost }),
+    none => err(if failure == "" then "no answer" else failure),
+  }
+}
+
+test "json parsing tolerates fences, prose and trailing commas" {
+  assert(result.is_ok(parse_json("{\"a\": 1}")))
+  assert(result.is_ok(parse_json("Here it is:\n```json\n{\"a\": [1, 2,],}\n```")))
+  assert(result.is_ok(parse_json("The answer {\"files\": [\"x\"]} done")))
+  assert(result.is_err(parse_json("nothing here")))
+}
+
+test "truncation detection and the effort ladder" {
+  assert(looks_truncated("{\"a\": \"unterminated"))
+  assert(not looks_truncated("{\"a\": 1}"))
+  assert(not looks_truncated("plain text"))
+  assert_eq(lower_effort("high"), "medium")
+  assert_eq(lower_effort("low"), "low")
+  assert(is_server_timeout("status 408: AiError: Request timeout"))
+  assert(is_transient("status 503: down"))
+  assert(not is_transient("status 400: bad schema"))
+}

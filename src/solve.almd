@@ -1,0 +1,537 @@
+// The loop: observe, read, edit, verify, repeat.
+//
+// Nothing is decided until the thing it depends on has been observed, and
+// the model is asked one small question at a time. Every rule here was
+// paid for on a benchmark run; the comments say which.
+
+import fs
+import env
+import json
+import regex
+import base64
+import bytes
+import self.llm
+import self.ask
+import self.observe
+import self.explain
+import self.gate
+
+type Edit = { path: String, source: String }
+type Rejected = { path: String, why: String }
+type Attempt = { n: Int, read: List[String], edits: List[Edit], rejected: List[Rejected], apply_error: String,
+  verify: observe.CommandResult?, ok: Bool, cost_usd: Float, ms: Int, explanation: String }
+type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String }
+type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool }
+
+let SELECT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Paths copied exactly from the FILES list. No others.\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"files\",\"reason\"],\"additionalProperties\":false}"
+
+let EDIT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file's path, exactly as it appears in the FILES list.\"},\"source\":{\"type\":\"string\",\"description\":\"Every line of the file as it should exist on disk after your change — the COMPLETE file. Never a file name, never a diff, never a description of the change, never only the changed part.\"}},\"required\":[\"path\",\"source\"],\"additionalProperties\":false}},\"explanation\":{\"type\":\"string\"}},\"required\":[\"edits\",\"explanation\"],\"additionalProperties\":false}"
+
+let SYSTEM = """
+You are a careful software engineer fixing one specific problem in an existing codebase.
+
+Rules that matter more than anything else:
+- Only claim things you can see in the material you were given. You were shown the real file list, the real file contents, and the real test output. Do not invent paths, symbols, commands or APIs.
+- Fix the actual cause. Making the test pass by deleting the test, deleting the import, inlining the function under test, or special-casing the test's inputs is a failure, not a fix.
+- Preserve everything you were not asked to change: imports, formatting, comments, unrelated functions. You are editing a file that other people work in.
+- When you emit a file, emit the whole file, exactly as it should appear on disk.
+"""
+
+effect fn note(quiet: Bool, text: String) -> Unit = if quiet then () else eprintln("  note: " + text)
+effect fn phase(quiet: Bool, name: String, detail: String) -> Unit = if quiet then () else eprintln("\n[" + name + "]" + (if detail == "" then "" else " " + detail))
+
+fn schema(s: String) -> Value = json.parse(s) ?? value.object([])
+
+// How the observation is shown to the model. Facts, in a fixed order.
+fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: String) -> String = {
+  var parts: List[String] = []
+  list.push(parts, "=== TASK ===\n" + task)
+  let fp_lang = option.map(obs.fingerprint, (f) => f.language) ?? "unknown"
+  let fp_marker = option.map(obs.fingerprint, (f) => f.marker) ?? "no marker file"
+  let fp_note = option.map(obs.fingerprint, (f) => f.note) ?? ""
+  list.push(parts, "=== PROJECT ===\nroot: " + obs.root + "\nlanguage: " + fp_lang + " (from " + fp_marker + ")\n"
+    + (if fp_note != "" then "note: " + fp_note + "\n" else "")
+    + "verify command: " + (if obs.verify_command == "" then "(none)" else obs.verify_command)
+    + (if obs.verify_source == "user" then "  [given by the user — this is the command that decides success]"
+       else if obs.verify_source == "marker" then "  [inferred from the marker file]" else ""))
+  list.push(parts, "=== FILES (" + int.to_string(list.len(obs.files)) + ") ===\n" + string.join(obs.files, "\n") + (if obs.files_omitted != "" then "\n" + obs.files_omitted else ""))
+  if string.trim(obs.repo_map) != "" then list.push(parts, "=== REPO MAP (ranked by how central each symbol is) ===\n" + obs.repo_map) else ()
+  match obs.baseline {
+    some(b) => list.push(parts, "=== CURRENT TEST OUTPUT (exit " + int.to_string(b.code) + (if b.timed_out then ", TIMED OUT" else "") + ") ===\n$ " + b.command + "\n" + (if baseline_excerpt == "" then "(no output)" else baseline_excerpt)),
+    none => (),
+  }
+  string.join(parts, "\n\n")
+}
+
+effect fn on_path(bin: String) -> Bool = (observe.run("command -v " + bin, ".", 5000)!).code == 0
+
+// Drop the parts of a ctxgate summary that point at a vault we cannot read.
+fn strip_vault_header(s: String) -> String =
+  string.join(list.map(list.filter(string.split(s, "\n"), (l) => not (regex.is_match("^\\[ctxgate\\].*vaulted as ctx:", l) or regex.is_match("^\\s+full text: ctxgate show ", l) or regex.is_match("^\\s+source: ", l))), (l) => string.replace(l, " (see vault)", "")), "\n")
+
+// What the model is shown of a failing command's output: a ctxgate summary
+// when it is installed, the output is long, and the summary is actually a
+// summary (shorter than its input, and not emptied of the failure);
+// otherwise the excerpt.
+effect fn failure_view(command: String, raw: String, root: String, tail_lines: Int, quiet: Bool) -> String = {
+  let text = string.trim(raw)
+  var summary = ""
+  if string.len(text) > 2000 and on_path("ctxgate")! then {
+    match fs.create_temp_file("agent-out") {
+      ok(tmp) => {
+        let _ = fs.write(tmp, text)
+        let r = observe.run("ctxgate summarize " + observe.shell_quote(if command == "" then "verify" else command) + " < " + observe.shell_quote(tmp), root, 20000)!
+        let _ = fs.remove(tmp)
+        if r.code == 0 then summary = string.trim_end(strip_vault_header(r.stdout)) else ()
+      },
+      err(_) => (),
+    }
+  } else ()
+  if summary != "" and string.len(summary) < string.len(text) and string.len(summary) >= 300 then {
+    note(quiet, "failure output via ctxgate: " + int.to_string(string.len(text)) + " -> " + int.to_string(string.len(summary)) + " chars")!
+    summary
+  } else explain.failure_excerpt(text, tail_lines)
+}
+
+// Every source file, when there are few enough to just read them all (an
+// Exercism exercise plus scaffolding is under eight).
+let SKIP_SOURCES = "(^|/)(package(-lock)?\\.json|Cargo\\.(toml|lock)|go\\.(mod|sum)|pyproject\\.toml|setup\\.(py|cfg)|CMakeLists\\.txt|build\\.gradle|gradlew(\\.bat)?|\\.gitignore|\\.npmrc|\\.eslintrc|babel\\.config\\.js|jest\\.config\\.js|tsconfig\\.json|requirements\\.txt|Makefile)$"
+
+fn small_project_sources(obs: observe.Observation) -> List[String] = {
+  let files = list.filter(obs.files, (f) => not regex.is_match(SKIP_SOURCES, f) and not string.contains(f, "/.") and not string.starts_with(f, "."))
+  if list.len(files) <= 8 then files else []
+}
+
+// Project files whose path appears in the baseline output, longest first.
+fn files_named_in(obs: observe.Observation) -> List[String] = match obs.baseline {
+  none => [],
+  some(b) => {
+    let hay = b.stdout + "\n" + b.stderr
+    list.sort_by(list.filter(obs.files, (f) => string.contains(hay, f)), (f) => 0 - string.len(f))
+  },
+}
+
+fn normalize_path(p: String) -> String = string.trim(string.strip_prefix(p, "./") ?? p)
+
+// Ask which files to read. The answer is checked against reality; a path
+// not in the list is dropped and said out loud.
+effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Observation, max: Int, model: String, quiet: Bool) -> (List[String], Float) = {
+  let whole = small_project_sources(obs)
+  if not list.is_empty(whole) then {
+    note(quiet, "small project: reading all " + int.to_string(list.len(whole)) + " source files, no selection call")!
+    (list.take(whole, max), 0.0)
+  } else {
+    let prompt = context + "\n\n=== QUESTION ===\nWhich files do you need to read to fix this? Choose at most " + int.to_string(max) + ".\nCopy each path exactly from the FILES list above. A path that is not in that list does not exist and will be discarded.\nPrefer the file the test output points at, plus whatever it calls."
+    var picked: List[String] = []
+    var cost = 0.0
+    match ask.ask_json(creds, prompt, schema(SELECT_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: 2048, reasoning_effort: "low" }) {
+      ok(a) => {
+        cost = a.cost_usd
+        picked = list.map(json.get_array(a.value, "files") ?? [], (v) => value.as_string(v) ?? "")
+      },
+      err(e) => note(quiet, "file selection failed: " + e)!,
+    }
+    var out: List[String] = []
+    for raw in picked {
+      let p = normalize_path(raw)
+      if list.contains(obs.files, p) then { if not list.contains(out, p) then list.push(out, p) else () }
+      else {
+        let matches = list.filter(obs.files, (f) => string.ends_with(f, "/" + p) or f == p)
+        if list.len(matches) == 1 then {
+          let m = list.first(matches) ?? p
+          if not list.contains(out, m) then list.push(out, m) else ()
+          note(quiet, "resolved \"" + p + "\" -> " + m)!
+        } else note(quiet, "rejected " + p + ": not in the file list")!
+      }
+    }
+    if list.is_empty(out) then {
+      for f in files_named_in(obs) { if list.len(out) < max and not list.contains(out, f) then list.push(out, f) else () }
+      for f in small_project_sources(obs) { if list.len(out) < max and not list.contains(out, f) then list.push(out, f) else () }
+      if not list.is_empty(out) then note(quiet, "selection empty; using files named in the test output")! else ()
+    } else ()
+    (list.take(out, max), cost)
+  }
+}
+
+// The files' contents for the prompt; a long file gets its outline first.
+effect fn render_files(root: String, paths: List[String], quiet: Bool) -> (String, List[String]) = {
+  var chunks: List[String] = []
+  var read: List[String] = []
+  let peek = on_path("peek")!
+  for p in paths {
+    let r = observe.read_for_model(root, p, 24000)!
+    if r.error != "" then note(quiet, "rejected " + p + ": " + r.error)!
+    else {
+      list.push(read, p)
+      var outline = ""
+      if peek and (r.truncated or list.len(string.split(r.content, "\n")) > 300) then {
+        let o = observe.run("peek outline " + observe.shell_quote(p), root, 20000)!
+        if o.code == 0 and string.trim(o.stdout) != "" then outline = "--- " + p + ": outline (peek) ---\n" + string.trim_end(o.stdout) + "\n\n" else ()
+      } else ()
+      list.push(chunks, outline + "--- " + p + (if r.truncated then " (TRUNCATED — this is only the first part)" else "") + " ---\n" + r.content)
+    }
+  }
+  (string.join(chunks, "\n\n"), read)
+}
+
+// How hard to think, and with which model, after N unusable answers.
+// Escalation is driven by unusable output, never by a failing test.
+type Rung = { effort: String, strong: Bool }
+let LADDER = [Rung { effort: "low", strong: false }, Rung { effort: "medium", strong: false }, Rung { effort: "high", strong: false }, Rung { effort: "high", strong: true }]
+fn rung_for(unusable: Int) -> Rung = list.get(LADDER, int.min(unusable, list.len(LADDER) - 1)) ?? Rung { effort: "low", strong: false }
+
+// An attempt that ran this long was the model thinking, not the tests; the
+// next one gets half the output budget and one rung less reasoning.
+let SLOW_ATTEMPT_MS = 300000
+fn budget_after(last_ms: Int, rung: Rung) -> (Int, String) =
+  if last_ms > SLOW_ATTEMPT_MS then (8192, ask.lower_effort(rung.effort)) else (16384, rung.effort)
+
+// A unified diff of one whole-file rewrite, for the history: the model is
+// told what it actually changed, not only what it meant. Line-level LCS.
+fn unified_diff(before: String, after: String) -> String = {
+  let a = if before == "" then [] else string.split(before, "\n")
+  let b = if after == "" then [] else string.split(after, "\n")
+  let n = list.len(a)
+  let m = list.len(b)
+  if n > 1500 or m > 1500 then "(rewrote " + int.to_string(m) + " lines; " + int.to_string(n) + " before — too large to diff)"
+  else {
+    // dp[i*(m+1)+j] = LCS length of a[i..], b[j..]
+    var dp: List[Int] = list.map(list.range(0, (n + 1) * (m + 1)), (_) => 0)
+    var i = n - 1
+    while i >= 0 {
+      var j = m - 1
+      while j >= 0 {
+        let v = if (list.get(a, i) ?? "") == (list.get(b, j) ?? "") then (list.get(dp, (i + 1) * (m + 1) + j + 1) ?? 0) + 1
+          else int.max(list.get(dp, (i + 1) * (m + 1) + j) ?? 0, list.get(dp, i * (m + 1) + j + 1) ?? 0)
+        dp = list.set(dp, i * (m + 1) + j, v)
+        j = j - 1
+      }
+      i = i - 1
+    }
+    var ops: List[(String, String)] = []
+    var x = 0
+    var y = 0
+    while x < n or y < m {
+      if x < n and y < m and (list.get(a, x) ?? "") == (list.get(b, y) ?? "") then { list.push(ops, (" ", list.get(a, x) ?? "")); x = x + 1; y = y + 1 }
+      else if x < n and (y >= m or (list.get(dp, (x + 1) * (m + 1) + y) ?? 0) >= (list.get(dp, x * (m + 1) + y + 1) ?? 0)) then { list.push(ops, ("-", list.get(a, x) ?? "")); x = x + 1 }
+      else { list.push(ops, ("+", list.get(b, y) ?? "")); y = y + 1 }
+    }
+    // keep changed lines plus two of context around them
+    var keep: List[Bool] = list.map(ops, (_) => false)
+    var k = 0
+    for (t, _) in ops {
+      if t != " " then { var c = int.max(0, k - 2); while c <= int.min(list.len(ops) - 1, k + 2) { keep = list.set(keep, c, true); c = c + 1 } } else ()
+      k = k + 1
+    }
+    var out: List[String] = []
+    var gap = false
+    k = 0
+    for (t, s) in ops {
+      if list.get(keep, k) ?? false then { if gap and not list.is_empty(out) then list.push(out, "  …") else (); gap = false; list.push(out, t + " " + s) }
+      else gap = true
+      k = k + 1
+    }
+    if list.is_empty(out) then "(no change)"
+    else if list.len(out) > 120 then string.join(list.take(out, 120), "\n") + "\n  … " + int.to_string(list.len(out) - 120) + " more diff lines"
+    else string.join(out, "\n")
+  }
+}
+
+// What makes two failures "the same failure": digits and hex collapsed.
+fn failure_key(why: String) -> String =
+  string.take(string.trim(regex.replace("\\s+", regex.replace("\\d+(\\.\\d+)?", regex.replace("0x[0-9a-fA-F]+", why, "#"), "#"), " ")), 600)
+
+// Force each written file's mtime into a later whole second, so a cache
+// keyed on (mtime seconds, size) — Python's .pyc, and others — cannot
+// serve a stale compile of a same-size rewrite.
+effect fn bump_mtimes(root: String, paths: List[String]) -> Unit = {
+  if list.is_empty(paths) then () else {
+    env.sleep_ms(1100 - (env.millis() % 1000))
+    for p in paths { let _ = observe.run("touch " + observe.shell_quote(p), root, 5000)!; () }
+  }
+}
+
+// The file without the markdown fence a model wraps it in, then decoded.
+fn unwrap_source(source: String) -> String = {
+  let t = string.trim(source)
+  let lines = string.split(t, "\n")
+  let first = list.first(lines) ?? ""
+  let last = list.last(lines) ?? ""
+  let fenced = list.len(lines) >= 2 and regex.is_match("^```[A-Za-z0-9+.-]*[ \\t]*$", first) and regex.is_match("^```\\s*$", last)
+  let s = if fenced then string.join(list.take(list.drop(lines, 1), list.len(lines) - 2), "\n") + "\n" else source
+  decode_source(s)
+}
+
+// Two more encodings seen on the polyglot run: the whole file as base64,
+// and every newline spelled as the two characters `\` `n`.
+fn decode_source(source: String) -> String = {
+  let t = string.trim(source)
+  let b64 = string.len(t) >= 40 and regex.is_match("^[A-Za-z0-9+/]+=*$", t) and string.len(t) % 4 == 0
+  let decoded = if b64 then (match base64.decode(t) { ok(bs) => bytes.to_string(bs) ?? "", err(_) => "" }) else ""
+  if decoded != "" and string.contains(decoded, "\n") and not string.contains(decoded, "\u{FFFD}") then (if string.ends_with(decoded, "\n") then decoded else decoded + "\n")
+  else if not string.contains(source, "\n") and string.count(source, "\\n") >= 2 then string.replace(string.replace(string.replace(string.replace(source, "\\r\\n", "\n"), "\\n", "\n"), "\\t", "\t"), "\\\"", "\"")
+  else source
+}
+
+// Why this edit must not be written, or "": a blank, a file name where the
+// file goes, a fragment, or a byte-identical echo. A parser cannot see size.
+effect fn degenerate_write(root: String, path: String, source: String) -> String = {
+  let full = root + "/" + path
+  match fs.stat(full) {
+    err(_) => "",
+    ok(st) =>
+      if st.size == 0 then ""
+      else if string.trim(source) == "" then "would blank the file: emit its full contents, with the fix applied"
+      else if not string.contains(source, "\n") and regex.is_match("^[A-Za-z0-9_./-]+\\.[A-Za-z0-9]{1,8}$", string.trim(source)) and string.len(source) < 200 then "looks like a file name (" + string.trim(source) + "), not file contents: source must be the whole file"
+      else if st.size > 200 and string.len(source) * 5 < st.size then "is a " + int.to_string(string.len(source)) + "-byte fragment of a " + int.to_string(st.size) + "-byte file: emit every line of the file, not just the part you changed"
+      else if (fs.read_text(full) ?? "") == source then "is identical to the current file: nothing was changed"
+      else "",
+  }
+}
+
+// Files git reports as modified or untracked, relative to the project root.
+effect fn changed_files(root: String) -> List[String] = {
+  let r = observe.run("git status --porcelain 2>/dev/null", root, 15000)!
+  list.filter(list.map(string.split(r.stdout, "\n"), (l) => string.trim(string.drop(l, 3))), (f) => f != "" and not observe.is_noise(f) and not observe.is_noise((string.strip_suffix(f, "/") ?? f) + "/x"))
+}
+
+// Reasons to distrust a passing test: tests touched, files changed that no
+// edit accounts for, an edited file that lost most of its lines.
+effect fn gaming_warnings(obs: observe.Observation, attempts: List[Attempt], changed: List[String]) -> List[String] = {
+  var out: List[String] = []
+  let touched = list.filter(changed, (f) => regex.is_match("(^|/)(tests?|spec|__tests__)/", string.to_lower(f)) or regex.is_match("(_test\\.|\\.test\\.|_spec\\.|\\.spec\\.|^test_)", string.to_lower(list.last(string.split(f, "/")) ?? "")))
+  if not list.is_empty(touched) then list.push(out, "test files were modified: " + string.join(touched, ", ") + " — check the fix is in the code, not the test") else ()
+  let edited = list.flatten(list.map(attempts, (a) => list.map(a.edits, (e) => e.path)))
+  let unexplained = list.filter(changed, (f) => not list.contains(edited, f))
+  if not list.is_empty(unexplained) then list.push(out, "files changed that no edit accounts for: " + string.join(unexplained, ", ")) else ()
+  for a in attempts {
+    for e in a.edits {
+      let r = observe.read_for_model(obs.root, e.path, 24000)!
+      if r.error == "" and list.len(string.split(r.content, "\n")) * 10 < list.len(string.split(e.source, "\n")) * 6 then list.push(out, e.path + " lost a large fraction of its lines") else ()
+    }
+  }
+  out
+}
+
+fn edit_of(v: Value) -> Edit? = match (json.get_string(v, "path"), json.get_string(v, "source")) {
+  (some(p), some(s)) => some(Edit { path: p, source: s }),
+  _ => none,
+}
+
+fn first_line(s: String) -> String = string.take(list.first(string.split(s, "\n")) ?? "", 80)
+
+effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, opts: Options) -> Result[Outcome, String] = {
+  let started = env.millis()
+  let quiet = opts.quiet
+  let dirty_before = changed_files(obs.root)!
+  let baseline_excerpt = match obs.baseline { some(b) => failure_view(b.command, b.stdout + "\n" + b.stderr, obs.root, 60, quiet)!, none => "" }
+  let context = render_observation(obs, task, baseline_excerpt)
+  var attempts: List[Attempt] = []
+  var warnings: List[String] = []
+  var total_cost = 0.0
+
+  // Nothing to do, and saying so is the whole answer: run against a green
+  // project the loop once replaced a working file with prose.
+  if option.map(obs.baseline, (b) => b.code == 0) ?? false then
+    ok(Outcome { ok: true, attempts: [], changed: [], cost_usd: 0.0, wall_ms: env.millis() - started,
+      warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"], harness_broken: "" })
+  else {
+    phase(quiet, "select", "")!
+    let (selected, select_cost) = select_files(creds, context, obs, opts.max_files, opts.model, quiet)!
+    total_cost = total_cost + select_cost
+    var paths = selected
+    if not quiet then eprintln("  reading: " + (if list.is_empty(paths) then "(nothing)" else string.join(paths, ", "))) else ()
+
+    var history = ""
+    var harness_broken = ""
+    var unusable = 0          // attempts that produced no edit worth running; drives the ladder
+    var last_attempt_ms = 0
+    var stuck = 0             // the same failure twice in a row climbs one rung
+    var last_failure_key = ""
+    var n = 1
+    var finished = false
+    while not finished and n <= opts.max_attempts {
+      let cost_before = total_cost
+      let started_at = env.millis()
+      phase(quiet, "edit", "attempt " + int.to_string(n) + "/" + int.to_string(opts.max_attempts))!
+      let (block, read) = render_files(obs.root, paths, quiet)!
+      let prompt = context + "\n\n=== FILE CONTENTS ===\n" + (if block == "" then "(none could be read)" else block)
+        + (if history != "" then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
+        + "\n\n=== QUESTION ===\nFix the problem.\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown.\n"
+        + (if obs.verify_command != "" then "Success is \"" + obs.verify_command + "\" exiting zero for the right reason.\n" else "")
+        + "Do not weaken, skip or delete tests to achieve it."
+
+      var edits: List[Edit] = []
+      var explanation = ""
+      var rejected: List[Rejected] = []
+      var apply_error = ""
+      var diffs: List[String] = []
+      let rung = rung_for(unusable + stuck)
+      let (max_tokens, effort) = budget_after(last_attempt_ms, rung)
+      if last_attempt_ms > SLOW_ATTEMPT_MS then note(quiet, "last attempt took " + int.to_string(last_attempt_ms / 1000) + "s; this one gets " + effort + " reasoning and " + int.to_string(max_tokens) + " output tokens")! else ()
+      if unusable > 0 then note(quiet, "last attempt produced nothing usable; reasoning=" + rung.effort + (if rung.strong then ", model=" + ask.MODEL_STRONG else ""))! else ()
+      let model = if rung.strong then ask.MODEL_STRONG else opts.model
+
+      // Two rounds, not two attempts: an answer refused for its shape is a
+      // formatting slip, and is asked again once with the reasons.
+      var round = 0
+      var stop_rounds = false
+      while not stop_rounds and round < 2 {
+        var repair = ""
+        if round == 1 then {
+          if not list.is_empty(edits) or list.is_empty(rejected) or apply_error != "" then stop_rounds = true
+          else {
+            repair = "\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n" + string.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + "\nAnswer again. For each file, `source` is the complete file as it should exist on disk, every line, with your change applied."
+            note(quiet, "every edit was rejected for its shape; asking once more with the reasons, same effort")!
+            rejected = []
+          }
+        } else ()
+        if not stop_rounds then {
+          match ask.ask_json(creds, prompt + repair, schema(EDIT_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: max_tokens, reasoning_effort: effort }) {
+            err(e) => { apply_error = "model: " + e },
+            ok(a) => {
+              total_cost = total_cost + a.cost_usd
+              explanation = json.get_string(a.value, "explanation") ?? ""
+              for v in json.get_array(a.value, "edits") ?? [] {
+                match edit_of(v) {
+                  none => list.push(rejected, Rejected { path: json.get_string(v, "path") ?? "?", why: "malformed edit" }),
+                  some(e0) => {
+                    let p = normalize_path(e0.path)
+                    let source = unwrap_source(e0.source)
+                    let on_disk = fs.exists(obs.root + "/" + p)
+                    if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown" }); note(quiet, "rejected " + p + ": not among the files it was shown")! }
+                    else if not on_disk and not opts.allow_create then { list.push(rejected, Rejected { path: p, why: "does not exist (creation not enabled)" }); note(quiet, "rejected " + p + ": does not exist")! }
+                    else if string.starts_with(p, "/") or string.contains(p, "..") then list.push(rejected, Rejected { path: p, why: "outside the project root" })
+                    else {
+                      let degenerate = degenerate_write(obs.root, p, source)!
+                      if degenerate != "" then {
+                        list.push(rejected, Rejected { path: p, why: degenerate })
+                        note(quiet, "rejected " + p + ": " + degenerate)!
+                        if string.len(source) < 200 then note(quiet, "  " + p + " was: " + string.take(source, 120))! else ()
+                      } else {
+                        match list.find_index(edits, (x) => x.path == p) {
+                          some(i) => { list.push(rejected, Rejected { path: p, why: "named twice in one batch" }); edits = list.remove_at(edits, i) },
+                          none => (),
+                        }
+                        list.push(edits, Edit { path: p, source: source })
+                      }
+                    }
+                  },
+                }
+              }
+            },
+          }
+          // One file, one write: the good write lands and the bad one is reported.
+          var applied: List[Edit] = []
+          for e in edits {
+            let full = obs.root + "/" + e.path
+            let before = fs.read_text(full) ?? ""
+            match gate.write_checked(full, e.source, true) {
+              ok(_) => { list.push(applied, e); list.push(diffs, "--- " + e.path + " ---\n" + unified_diff(before, e.source)) },
+              err(why) => {
+                let shape = "refused by the syntax gate: " + why + "; the file begins \"" + first_line(e.source) + "\""
+                list.push(rejected, Rejected { path: e.path, why: shape })
+                note(quiet, "apply rejected " + e.path + ": " + why)!
+              },
+            }
+          }
+          edits = applied
+          if not list.is_empty(applied) then {
+            bump_mtimes(obs.root, list.map(applied, (e) => e.path))!
+            if not quiet then { for e in applied { eprintln("  wrote " + e.path + " (" + int.to_string(string.len(e.source)) + " bytes)") } } else ()
+          } else ()
+        } else ()
+        round = round + 1
+      }
+
+      if list.is_empty(edits) and apply_error == "" then
+        apply_error = if list.is_empty(rejected) then "the model produced no edits at all" else "every edit was rejected: " + string.join(list.map(rejected, (r) => r.why), "; ")
+      else ()
+      if list.is_empty(edits) then {
+        if apply_error != "" and ask.is_server_timeout(apply_error) then { unusable = int.max(0, unusable - 1); note(quiet, "the provider timed out on that request; trying again with less reasoning, not more")! }
+        else unusable = unusable + 1
+      } else ()
+
+      var verify: observe.CommandResult? = none
+      var passed = false
+      if apply_error == "" and obs.verify_command != "" then {
+        phase(quiet, "verify", "")!
+        let v = observe.run(obs.verify_command, obs.root, 120000)!
+        verify = some(v)
+        passed = v.code == 0
+        if not quiet then eprintln("  " + (if passed then "PASS" else "FAIL") + " (exit " + int.to_string(v.code) + ", " + int.to_string(v.duration_ms) + "ms)") else ()
+        note(quiet, "attempt " + int.to_string(n) + " took " + int.to_string((env.millis() - started_at) / 1000) + "s")!
+        let broken = observe.harness_failure(v)
+        if broken != "" then { harness_broken = broken; note(quiet, "verify command is broken: " + broken)!; finished = true } else ()
+      } else if apply_error == "" then list.push(warnings, "no verify command: success was not checked")
+      else ()
+
+      last_attempt_ms = env.millis() - started_at
+      list.push(attempts, Attempt { n: n, read: read, edits: edits, rejected: rejected, apply_error: apply_error, verify: verify, ok: passed,
+        cost_usd: total_cost - cost_before, ms: last_attempt_ms, explanation: explanation })
+      if passed then finished = true else ()
+
+      if not finished then {
+        let why = if apply_error != "" then apply_error
+          else match verify { some(v) => failure_view(obs.verify_command, v.stdout + "\n" + v.stderr, obs.root, 40, quiet)!, none => "unknown" }
+        var explanations = ""
+        match verify {
+          some(v) => match explain.explainer_for(option.map(obs.fingerprint, (f) => f.language) ?? "") {
+            some(ex) => {
+              let found = explain.explain(v.stdout + "\n" + v.stderr, ex, obs.root)!
+              if not list.is_empty(found) then { explanations = "\n" + explain.render_explanations(found) + "\n"; note(quiet, "explained " + string.join(list.map(found, (f) => f.code), ", "))! } else ()
+            },
+            none => (),
+          },
+          none => (),
+        }
+        let rejection_note = if list.is_empty(rejected) then "" else "rejected before it ran:\n" + string.join(list.map(rejected, (r) => "  " + r.path + ": " + r.why), "\n") + "\n"
+        var repeat_note = ""
+        if apply_error == "" and option.is_some(verify) then {
+          let key = failure_key(why)
+          if last_failure_key != "" and key == last_failure_key then {
+            stuck = stuck + 1
+            repeat_note = "THE SAME FAILURE AS THE PREVIOUS ATTEMPT. The last change did not move it. Do not adjust the previous approach; replace it — a different algorithm, data structure or control flow. Re-read the failing test's expectation first.\n"
+            note(quiet, "same failure as attempt " + int.to_string(n - 1) + "; escalating one rung and asking for a different approach")!
+          } else stuck = 0
+          last_failure_key = key
+        } else ()
+        history = history + "\nAttempt " + int.to_string(n) + ": edited " + (if list.is_empty(edits) then "(nothing)" else string.join(list.map(edits, (e) => e.path), ", ")) + "\n"
+          + (if explanation != "" then "intent: " + explanation + "\n" else "")
+          + (if list.is_empty(diffs) then "" else "changed:\n" + string.join(diffs, "\n") + "\n")
+          + rejection_note + "result: FAILED\n" + why + "\n" + repeat_note + explanations
+        if n < opts.max_attempts then match verify {
+          some(v) => {
+            let hay = v.stdout + "\n" + v.stderr
+            let fresh = list.filter(obs.files, (f) => string.contains(hay, f) and not list.contains(paths, f))
+            if not list.is_empty(fresh) then {
+              paths = list.take(paths + fresh, opts.max_files + 2)
+              note(quiet, "failure names new files: " + string.join(fresh, ", "))!
+            } else ()
+          },
+          none => (),
+        } else ()
+      } else ()
+      n = n + 1
+    }
+
+    let changed = list.filter(changed_files(obs.root)!, (f) => not list.contains(dirty_before, f))
+    let solved = option.map(list.last(attempts), (a) => a.ok) ?? false
+    if solved then { for w in gaming_warnings(obs, attempts, changed)! { list.push(warnings, w) } } else ()
+    ok(Outcome { ok: solved, attempts: attempts, changed: changed, cost_usd: total_cost, wall_ms: env.millis() - started, warnings: warnings, harness_broken: harness_broken })
+  }
+}
+
+test "unified_diff shows the change with context" {
+  let d = unified_diff("a\nb\nc\nd\ne\nf\n", "a\nb\nX\nd\ne\nf\n")
+  assert(string.contains(d, "- c"))
+  assert(string.contains(d, "+ X"))
+  assert_eq(unified_diff("same\n", "same\n"), "(no change)")
+}
+
+test "sources are unwrapped and decoded; failures are keyed without numbers" {
+  assert_eq(unwrap_source("```rust\nfn main() {}\n```"), "fn main() {}\n")
+  assert_eq(decode_source("line one\\nline two\\n"), "line one\nline two\n")
+  assert_eq(failure_key("took 0.012s at 0x7fff"), "took #s at #")
+  assert_eq(budget_after(400000, Rung { effort: "high", strong: false }), (8192, "medium"))
+}

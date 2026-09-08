@@ -1,0 +1,83 @@
+// Asking the toolchain to explain its own diagnostics, and choosing the
+// part of a failure worth showing the model.
+
+import regex
+import self.observe
+
+type Explainer = { language: String, pattern: String, command: String }   // `{}` is the code
+
+let EXPLAINERS = [
+  Explainer { language: "almide", pattern: "error\\[(E\\d+)\\]", command: "almide explain {}" },
+  Explainer { language: "rust", pattern: "error\\[(E\\d{4})\\]", command: "rustc --explain {}" },
+]
+
+fn explainer_for(language: String) -> Explainer? = list.find(EXPLAINERS, (e) => e.language == language)
+
+// Diagnostic codes named in this output, in first-seen order.
+fn codes_in(output: String, pattern: String) -> List[String] = {
+  var out: List[String] = []
+  for m in regex.find_all(pattern, output) {
+    match regex.captures(pattern, m) {
+      some(cs) => { let code = list.get(cs, 1) ?? ""; if code != "" and not list.contains(out, code) then list.push(out, code) else () },
+      none => (),
+    }
+  }
+  out
+}
+
+type Explanation = { code: String, text: String }
+
+// Look up each code the output mentions (at most three: a badly broken
+// file repeats the same codes for thirty lines). Unknown codes are skipped.
+effect fn explain(output: String, ex: Explainer, cwd: String) -> List[Explanation] = {
+  var out: List[Explanation] = []
+  for code in list.take(codes_in(output, ex.pattern), 3) {
+    let r = observe.run(string.replace(ex.command, "{}", code), cwd, 15000)!
+    let text = string.trim(r.stdout)
+    if r.code == 0 and text != "" and not string.contains(string.to_lower(text), "unknown error code") then list.push(out, Explanation { code: code, text: text }) else ()
+  }
+  out
+}
+
+fn render_explanations(xs: List[Explanation]) -> String =
+  if list.is_empty(xs) then ""
+  else "=== WHAT THE TOOLCHAIN SAYS ABOUT THESE DIAGNOSTICS ===\nThis is the compiler's own documentation for the errors above. It is\nauthoritative — prefer it over what the same code would mean in\nanother language.\n\n"
+    + string.join(list.map(xs, (x) => "--- " + x.code + " ---\n" + (if string.len(x.text) > 2400 then string.take(x.text, 2400) + "\n… (truncated)" else x.text)), "\n\n")
+
+// Where one failure's report begins, per tool: compilers put error/warning
+// at column 0; jest `●`, go `--- FAIL:`, pytest `___ name ___`, cargo
+// `---- name stdout ----`, catch2 a dashed rule.
+fn starts_diagnostic(l: String) -> Bool =
+  regex.is_match("^(error|warning)([^a-zA-Z0-9_]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701", l) or regex.is_match("^\\s{0,4}● ", l) or regex.is_match("^\\s*--- FAIL: ", l)
+  or regex.is_match("^_{3,} .+ _{3,}$", l) or regex.is_match("^---- .+ stdout ----$", l) or regex.is_match("^-{20,}$", l)
+
+// The first few whole diagnostics when the output is a list of them (the
+// first is the cause, the rest cascade); otherwise the tail.
+fn failure_excerpt(output: String, tail_lines: Int) -> String = {
+  let text = string.trim(output)
+  if text == "" then ""
+  else {
+    let lines = string.split(text, "\n")
+    var starts: List[Int] = []
+    var i = 0
+    for l in lines { if starts_diagnostic(l) then list.push(starts, i) else (); i = i + 1 }
+    if list.len(starts) < 2 then observe.tail(text, tail_lines)
+    else {
+      let first = list.get(starts, 0) ?? 0
+      let end = list.get(starts, 5) ?? list.len(lines)
+      let head = string.join(list.take(list.drop(lines, first), end - first), "\n")
+      let omitted = list.len(starts) - int.min(5, list.len(starts))
+      if omitted > 0 then head + "\n\n… and " + int.to_string(omitted) + " more diagnostic(s). Fix these first — later errors are usually caused by the earlier ones."
+      else head
+    }
+  }
+}
+
+test "failure_excerpt keeps the first diagnostics, not the tail" {
+  let out = "error[E1]: a\n  at x\nerror[E2]: b\nerror[E3]: c\nerror[E4]: d\nerror[E5]: e\nerror[E6]: f\nerror[E7]: g\n"
+  let ex = failure_excerpt(out, 2)
+  assert(string.starts_with(ex, "error[E1]: a"))
+  assert(string.contains(ex, "2 more diagnostic"))
+  assert_eq(failure_excerpt("a\nb\nc", 2), "b\nc")
+  assert_eq(codes_in("error[E002] x error[E018] y error[E002]", "error\\[(E\\d+)\\]"), ["E002", "E018"])
+}
