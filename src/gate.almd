@@ -41,6 +41,12 @@ let BUILTIN = [
   ("toml", "toml", "python3", ["-c", "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))", "{}"]),
 ]
 
+// Languages with no grammar here and no syntax-only tool of their own. They
+// still get the check that cannot be wrong: `gramide balance` reads brackets
+// and literals, so it catches a generation that stopped halfway or answered
+// with prose, and passes anything a compiler would parse.
+let BALANCE_EXTS = ["java", "cpp", "cc", "cxx", "hpp", "hh", "h", "c", "cs", "kt", "scala", "swift", "ts", "tsx", "m", "mm"]
+
 let NONE = Checker { label: "", program: "", args: [] }
 
 effect fn on_path(bin: String) -> Bool = (observe.run("command -v " + bin, ".", 5000)!).code == 0
@@ -69,7 +75,7 @@ effect fn checker_for(path: String) -> Checker = {
       if (ext == "almd" or ext == "go") and on_path("gramide")! then Checker { label: "gramide", program: "gramide", args: ["check", "{}"] }
       else match list.find(BUILTIN, (b) => b.0 == ext) {
         some((_, label, program, args)) => Checker { label: label, program: program, args: args },
-        none => NONE,
+        none => if list.contains(BALANCE_EXTS, ext) and on_path("gramide")! then Checker { label: "balance", program: "gramide", args: ["balance", "{}"] } else NONE,
       },
   }
 }
@@ -145,6 +151,10 @@ test "the gate covers the languages it claims to" {
   assert(list.any(BUILTIN, (b) => b.0 == "rs" and b.2 == "rustfmt"))
   assert(list.any(BUILTIN, (b) => b.0 == "py"))
   assert(not list.any(BUILTIN, (b) => b.0 == "java" or b.0 == "cpp"))
+  // …but they are not ungated: they get the check that cannot be wrong
+  assert(list.contains(BALANCE_EXTS, "java"))
+  assert(list.contains(BALANCE_EXTS, "cpp"))
+  assert(not list.contains(BALANCE_EXTS, "rs"))
 }
 
 test "configured checker parsing adds the placeholder" {

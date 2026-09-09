@@ -47,7 +47,7 @@ agent llm-test                      1 回だけ呼んで資格情報を確かめ
 | Almide, Go | gramide（無ければ `almide check` / `gofmt -e`） |
 | Rust | `rustfmt --emit stdout` — 解決せずにパースするので、未解決の `use crate::…` も通る |
 | Python, Ruby, JavaScript, PHP, Lua, shell, JSON, TOML | 各言語が同梱するツール |
-| Java, C++ | まだ無し。コンパイラは構文エラーと未定義シンボルを区別するのにプロジェクト全体を要求し、正しい編集を拒むゲートは無いより悪い |
+| Java, C++, C, C#, Kotlin, Scala, Swift, TypeScript | `gramide balance` — 括弧とリテラルだけ。コンパイラは構文エラーと未定義シンボルの区別にプロジェクト全体を要求し、正しい編集を拒むゲートは無いより悪い。これは正しいコードを拒めず、実際に起きる失敗（生成の途中切れ）を捕まえる |
 
 ## 現状
 

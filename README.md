@@ -59,7 +59,7 @@ No file lands on disk unless it still parses. In tier order: a checker you confi
 | Almide, Go | gramide (or `almide check` / `gofmt -e` when it is absent) |
 | Rust | `rustfmt --emit stdout` — it parses without resolving, so an unresolved `use crate::…` still passes |
 | Python, Ruby, JavaScript, PHP, Lua, shell, JSON, TOML | the tool each ships |
-| Java, C++ | nothing yet: their compilers need the whole project to tell a syntax error from a missing symbol, and one that refuses a correct edit is worse than none |
+| Java, C++, C, C#, Kotlin, Scala, Swift, TypeScript | `gramide balance` — brackets and literals only. Their compilers need the whole project to tell a syntax error from a missing symbol, and a gate that refuses a correct edit is worse than none; this one cannot refuse valid code, and catches the failure that actually happens (a generation that stopped halfway) |
 
 ## Status
 
