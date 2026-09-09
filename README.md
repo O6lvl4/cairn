@@ -63,11 +63,25 @@ No file lands on disk unless it still parses. In tier order: a checker you confi
 
 ## Status
 
-Honest: this is a port, and it is not yet measured against what it was ported from.
-The loop, the guards and the retry policy are the ones famulus5 measured; whether
-they carry the same score here is an open question, and `bench/almide.sh` is where
-that gets answered. The seeded-bug check passes (one attempt, five seconds, two
-hundredths of a cent).
+Measured once, on the Almide exercise set — 23 problems in a language the model has
+never seen, given the language's cheatsheet and the signatures to implement, six
+attempts each, `cf:glm-5.3-flash` throughout:
+
+| | solved | cost |
+|---|---|---|
+| this agent | **23/23 (100%)** | $0.19 |
+| famulus5, the TypeScript original | 21/23 (91.3%) | $0.16 |
+
+Thirteen were solved on the first attempt, eight on the second, two on the third.
+
+Read that as parity, not as a win. Twenty-three problems is a small set, and the two
+that separate the runs are well inside the noise the same harness showed elsewhere
+(±4 points across identical code on a 225-problem set). What it does establish is
+that nothing was lost in the port. The comparison that would settle it is Aider's
+polyglot benchmark, 225 problems across six languages, where famulus5 scores 84–85%;
+`bench/exercism.sh` is ported and waiting on a checkout of that corpus.
+
+The seeded-bug check passes too: one attempt, five seconds, two hundredths of a cent.
 
 ## Build
 
