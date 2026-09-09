@@ -74,6 +74,13 @@ effect fn checker_for(path: String) -> Checker = {
   }
 }
 
+// A toolchain that words a syntax error better than a generic parser can.
+// Only consulted once the gate has ALREADY refused, so a compiler that would
+// reject a correct file for a missing symbol cannot refuse anything here —
+// it only gets to say why the refusal happened. gramide answers "unexpected
+// `&&`"; `almide check` answers "operator '&&' has been removed. Use 'and'".
+let SECOND_OPINION = [("almd", "almide", "almide check")]
+
 type Verdict = { kind: String, why: String }   // ok | invalid | unavailable
 
 effect fn run_checker(c: Checker, tmp: String) -> Verdict =
@@ -100,6 +107,20 @@ effect fn write_checked(path: String, source: String, create: Bool) -> Result[Wr
   if not create and not fs.exists(path) then err("edit.write: " + path + " does not exist (use create to make a new file)")
   else write_gated(path, source)
 
+effect fn explain_refusal(path: String, tmp: String, why: String) -> String = {
+  let ext = observe.extension_of(path)
+  match list.find(SECOND_OPINION, (s) => s.0 == ext) {
+    none => why,
+    some((_, bin, cmd)) =>
+      if not on_path(bin)! then why
+      else {
+        let r = observe.run(cmd + " " + observe.shell_quote(tmp), ".", 30000)!
+        let said = string.trim(string.replace(r.stdout + r.stderr, tmp, "<file>"))
+        if r.code != 0 and said != "" then said else why
+      },
+  }
+}
+
 effect fn write_gated(path: String, source: String) -> Result[Written, String] = {
   let c = checker_for(path)!
   let dir = match string.last_index_of(path, "/") { some(i) => string.take(path, i), none => "." }
@@ -108,7 +129,11 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
   let tmp = dir + "/." + name + ".agent.tmp" + (if ext == "" then "" else "." + ext)
   fs.write(tmp, source) |> result.map_err((e) => "edit.write: " + e)!
   let v = run_checker(c, tmp)!
-  if v.kind == "invalid" then { let _ = fs.remove(tmp); err("edit.write: " + v.why) }
+  if v.kind == "invalid" then {
+    let why = explain_refusal(path, tmp, v.why)!
+    let _ = fs.remove(tmp)
+    err("edit.write: " + why)
+  }
   else {
     fs.rename(tmp, path) |> result.map_err((e) => "edit.write: rename: " + e)!
     ok(Written { path: path, bytes: list.len(string.to_bytes(source)), checked: if v.kind == "ok" and c.label != "" then c.label else "" })
