@@ -186,53 +186,83 @@ let SLOW_ATTEMPT_MS = 300000
 fn budget_after(last_ms: Int, rung: Rung) -> (Int, String) =
   if last_ms > SLOW_ATTEMPT_MS then (8192, ask.lower_effort(rung.effort)) else (16384, rung.effort)
 
-// A unified diff of one whole-file rewrite, for the history: the model is
-// told what it actually changed, not only what it meant. Line-level LCS.
+// A unified diff of one whole-file rewrite, for the history.
+//
+// The history told the model what it MEANT ("intent: …") and what happened
+// ("result: FAILED …"), never what it actually changed. On the next attempt
+// it reads the file it just wrote as if it were the original. The diff is
+// the missing fact.
+//
+// The common prefix and suffix are trimmed before any LCS runs. That is not
+// only an optimisation: `list.set` is not constant time here, so the square
+// table cost 2.4 s on a 400-line file and would have hung on a real one. A
+// whole-file rewrite that changes a few lines has a tiny middle, and only
+// the middle is worth a table.
+let DIFF_CONTEXT = 2
+let DIFF_MAX_MIDDLE = 400
+let DIFF_MAX_LINES = 120
+
+fn common_prefix(a: List[String], b: List[String]) -> Int = {
+  var i = 0
+  while i < list.len(a) and i < list.len(b) and (list.get(a, i) ?? "") == (list.get(b, i) ?? "") { i = i + 1 }
+  i
+}
+
+fn common_suffix(a: List[String], b: List[String], floor: Int) -> Int = {
+  var s = 0
+  while list.len(a) - s > floor and list.len(b) - s > floor
+    and (list.get(a, list.len(a) - s - 1) ?? "") == (list.get(b, list.len(b) - s - 1) ?? "") { s = s + 1 }
+  s
+}
+
+// `(tag, line)` for the middle: " " kept, "-" removed, "+" added.
+fn lcs_ops(a: List[String], b: List[String]) -> List[(String, String)] = {
+  let n = list.len(a)
+  let m = list.len(b)
+  var dp: List[Int] = list.map(list.range(0, (n + 1) * (m + 1)), (_) => 0)
+  var i = n - 1
+  while i >= 0 {
+    var j = m - 1
+    while j >= 0 {
+      let v = if (list.get(a, i) ?? "") == (list.get(b, j) ?? "") then (list.get(dp, (i + 1) * (m + 1) + j + 1) ?? 0) + 1
+        else int.max(list.get(dp, (i + 1) * (m + 1) + j) ?? 0, list.get(dp, i * (m + 1) + j + 1) ?? 0)
+      dp = list.set(dp, i * (m + 1) + j, v)
+      j = j - 1
+    }
+    i = i - 1
+  }
+  var ops: List[(String, String)] = []
+  var x = 0
+  var y = 0
+  while x < n or y < m {
+    if x < n and y < m and (list.get(a, x) ?? "") == (list.get(b, y) ?? "") then { list.push(ops, (" ", list.get(a, x) ?? "")); x = x + 1; y = y + 1 }
+    else if x < n and (y >= m or (list.get(dp, (x + 1) * (m + 1) + y) ?? 0) >= (list.get(dp, x * (m + 1) + y + 1) ?? 0)) then { list.push(ops, ("-", list.get(a, x) ?? "")); x = x + 1 }
+    else { list.push(ops, ("+", list.get(b, y) ?? "")); y = y + 1 }
+  }
+  ops
+}
+
 fn unified_diff(before: String, after: String) -> String = {
   let a = if before == "" then [] else string.split(before, "\n")
   let b = if after == "" then [] else string.split(after, "\n")
-  let n = list.len(a)
-  let m = list.len(b)
-  if n > 1500 or m > 1500 then "(rewrote " + int.to_string(m) + " lines; " + int.to_string(n) + " before — too large to diff)"
+  let p = common_prefix(a, b)
+  let s = common_suffix(a, b, p)
+  let a_mid = list.take(list.drop(a, p), list.len(a) - s - p)
+  let b_mid = list.take(list.drop(b, p), list.len(b) - s - p)
+  if list.is_empty(a_mid) and list.is_empty(b_mid) then "(no change)"
+  else if list.len(a_mid) > DIFF_MAX_MIDDLE or list.len(b_mid) > DIFF_MAX_MIDDLE then
+    "(rewrote " + int.to_string(list.len(b)) + " lines; " + int.to_string(list.len(a)) + " before — too large to diff)"
   else {
-    // dp[i*(m+1)+j] = LCS length of a[i..], b[j..]
-    var dp: List[Int] = list.map(list.range(0, (n + 1) * (m + 1)), (_) => 0)
-    var i = n - 1
-    while i >= 0 {
-      var j = m - 1
-      while j >= 0 {
-        let v = if (list.get(a, i) ?? "") == (list.get(b, j) ?? "") then (list.get(dp, (i + 1) * (m + 1) + j + 1) ?? 0) + 1
-          else int.max(list.get(dp, (i + 1) * (m + 1) + j) ?? 0, list.get(dp, i * (m + 1) + j + 1) ?? 0)
-        dp = list.set(dp, i * (m + 1) + j, v)
-        j = j - 1
-      }
-      i = i - 1
-    }
+    // the two lines either side of the change, from what was trimmed
     var ops: List[(String, String)] = []
-    var x = 0
-    var y = 0
-    while x < n or y < m {
-      if x < n and y < m and (list.get(a, x) ?? "") == (list.get(b, y) ?? "") then { list.push(ops, (" ", list.get(a, x) ?? "")); x = x + 1; y = y + 1 }
-      else if x < n and (y >= m or (list.get(dp, (x + 1) * (m + 1) + y) ?? 0) >= (list.get(dp, x * (m + 1) + y + 1) ?? 0)) then { list.push(ops, ("-", list.get(a, x) ?? "")); x = x + 1 }
-      else { list.push(ops, ("+", list.get(b, y) ?? "")); y = y + 1 }
-    }
-    // keep changed lines plus two of context around them
-    var keep: List[Bool] = list.map(ops, (_) => false)
-    var k = 0
-    for (t, _) in ops {
-      if t != " " then { var c = int.max(0, k - 2); while c <= int.min(list.len(ops) - 1, k + 2) { keep = list.set(keep, c, true); c = c + 1 } } else ()
-      k = k + 1
-    }
+    for l in list.drop(list.take(a, p), int.max(0, p - DIFF_CONTEXT)) { list.push(ops, (" ", l)) }
+    for o in lcs_ops(a_mid, b_mid) { list.push(ops, o) }
+    for l in list.take(list.drop(a, list.len(a) - s), DIFF_CONTEXT) { list.push(ops, (" ", l)) }
     var out: List[String] = []
-    var gap = false
-    k = 0
-    for (t, s) in ops {
-      if list.get(keep, k) ?? false then { if gap and not list.is_empty(out) then list.push(out, "  …") else (); gap = false; list.push(out, t + " " + s) }
-      else gap = true
-      k = k + 1
-    }
-    if list.is_empty(out) then "(no change)"
-    else if list.len(out) > 120 then string.join(list.take(out, 120), "\n") + "\n  … " + int.to_string(list.len(out) - 120) + " more diff lines"
+    if p > DIFF_CONTEXT then list.push(out, "  …") else ()
+    for (t, line) in ops { list.push(out, t + " " + line) }
+    if s > DIFF_CONTEXT then list.push(out, "  …") else ()
+    if list.len(out) > DIFF_MAX_LINES then string.join(list.take(out, DIFF_MAX_LINES), "\n") + "\n  … " + int.to_string(list.len(out) - DIFF_MAX_LINES) + " more diff lines"
     else string.join(out, "\n")
   }
 }
@@ -522,11 +552,20 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
   }
 }
 
-test "unified_diff shows the change with context" {
+test "unified_diff shows the change with two lines of context" {
   let d = unified_diff("a\nb\nc\nd\ne\nf\n", "a\nb\nX\nd\ne\nf\n")
   assert(string.contains(d, "- c"))
   assert(string.contains(d, "+ X"))
+  assert(string.contains(d, "  b"))
+  assert(string.contains(d, "  d"))
   assert_eq(unified_diff("same\n", "same\n"), "(no change)")
+  // a long unchanged head and tail cost nothing and are elided
+  let big_a = string.join(list.map(list.range(0, 800), (i) => "line " + int.to_string(i)), "\n")
+  let big_b = string.replace(big_a, "line 400", "CHANGED")
+  let d2 = unified_diff(big_a, big_b)
+  assert(string.contains(d2, "- line 400"))
+  assert(string.contains(d2, "+ CHANGED"))
+  assert(string.starts_with(d2, "  …"))
 }
 
 test "sources are unwrapped and decoded; failures are keyed without numbers" {

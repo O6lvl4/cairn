@@ -92,14 +92,38 @@ type CommandResult = { command: String, code: Int, stdout: String, stderr: Strin
 // Run a command in `cwd` through `bash -c` (not a login shell: that
 // rebuilds PATH and once swapped the user's python3 for another) with a
 // deadline. Output is both streams, captured.
+//
+// The streams go to files rather than the inherited pipes, because a
+// command that leaves a background process running keeps those pipes open
+// and the runtime waits on them: measured on almide 0.62, a 3-second
+// deadline on `sleep 30 & sleep 20` returned after 30 seconds, reporting
+// "timed out after 3000ms". Redirected to files the same call returns in
+// 3.0 seconds. A test suite that starts a server is the ordinary case here.
 effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = {
   let t0 = env.millis()
-  let script = "cd " + shell_quote(cwd) + " && " + command
-  match process.exec_status_timeout("bash", ["-c", script], timeout_ms) {
-    ok(st) => CommandResult { command: command, code: st.code, stdout: st.stdout, stderr: st.stderr, timed_out: false, duration_ms: env.millis() - t0, spawn_error: "" },
+  let out_path = fs.create_temp_file("agent-stdout") ?? ""
+  let err_path = fs.create_temp_file("agent-stderr") ?? ""
+  let redirect = if out_path == "" or err_path == "" then ""
+    else " > " + shell_quote(out_path) + " 2> " + shell_quote(err_path)
+  // a subshell, not a brace group: `{ cmd & ; }` is a bash syntax error and a
+  // verify command is allowed to end in `&`
+  let script = "cd " + shell_quote(cwd) + " && ( " + command + " )" + redirect
+  let status = process.exec_status_timeout("bash", ["-c", script], timeout_ms)
+  // whatever was written before the deadline is still what the model needs
+  let captured_out = if out_path == "" then "" else (fs.read_text(out_path) ?? "")
+  let captured_err = if err_path == "" then "" else (fs.read_text(err_path) ?? "")
+  if out_path != "" then { let _ = fs.remove(out_path); () } else ()
+  if err_path != "" then { let _ = fs.remove(err_path); () } else ()
+  match status {
+    ok(st) => CommandResult { command: command, code: st.code,
+      stdout: if redirect == "" then st.stdout else captured_out,
+      stderr: if redirect == "" then st.stderr else captured_err,
+      timed_out: false, duration_ms: env.millis() - t0, spawn_error: "" },
     err(e) => {
       let timed = regex.is_match("time(d)? ?out|deadline", string.to_lower(e))
-      CommandResult { command: command, code: -1, stdout: "", stderr: e, timed_out: timed, duration_ms: env.millis() - t0, spawn_error: if timed then "" else e }
+      CommandResult { command: command, code: -1, stdout: captured_out,
+        stderr: captured_err + (if captured_err == "" then "" else "\n") + e,
+        timed_out: timed, duration_ms: env.millis() - t0, spawn_error: if timed then "" else e }
     },
   }
 }

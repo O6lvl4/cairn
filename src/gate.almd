@@ -18,7 +18,13 @@ import self.observe
 
 type Checker = { label: String, program: String, args: List[String] }   // `{}` is the file path; label "" = none
 
+// Never a compiler: `rustc` on one file of a project fails on `use crate::…`
+// and would refuse correct edits. `rustfmt --emit stdout` is the exception
+// that is not one — it parses and never resolves, so it takes a file with
+// unresolved imports (exit 0) and refuses an unclosed delimiter (exit 1).
+// Java and C++ have no such tool and are left ungated, said out loud.
 let BUILTIN = [
+  ("rs", "rust", "rustfmt", ["--emit", "stdout", "--edition", "2021", "{}"]),
   ("py", "python", "python3", ["-m", "py_compile", "{}"]),
   ("pyi", "python", "python3", ["-m", "py_compile", "{}"]),
   ("rb", "ruby", "ruby", ["-c", "{}"]),
@@ -75,7 +81,9 @@ effect fn run_checker(c: Checker, tmp: String) -> Verdict =
   else {
     let args = list.map(c.args, (a) => if a == "{}" then tmp else a)
     match process.exec_status_timeout(c.program, args, 30000) {
-      err(e) => if string.contains(string.to_lower(e), "not found") or string.contains(e, "No such file") then Verdict { kind: "unavailable", why: "" } else Verdict { kind: "invalid", why: e },
+      // ask PATH, do not read the error text: a checker that exists and crashed
+      // is a different fact from one that is not installed (ADR-0004)
+      err(e) => if on_path(c.program)! then Verdict { kind: "invalid", why: e } else Verdict { kind: "unavailable", why: "" },
       ok(st) => if st.code == 0 then Verdict { kind: "ok", why: "" }
         else {
           let msg = string.trim(string.replace(st.stdout + st.stderr, tmp, "<file>"))
@@ -105,6 +113,13 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
     fs.rename(tmp, path) |> result.map_err((e) => "edit.write: rename: " + e)!
     ok(Written { path: path, bytes: list.len(string.to_bytes(source)), checked: if v.kind == "ok" and c.label != "" then c.label else "" })
   }
+}
+
+test "the gate covers the languages it claims to" {
+  // (checker_for is an effect fn; this asserts the table it reads)
+  assert(list.any(BUILTIN, (b) => b.0 == "rs" and b.2 == "rustfmt"))
+  assert(list.any(BUILTIN, (b) => b.0 == "py"))
+  assert(not list.any(BUILTIN, (b) => b.0 == "java" or b.0 == "cpp"))
 }
 
 test "configured checker parsing adds the placeholder" {

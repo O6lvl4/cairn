@@ -48,6 +48,19 @@ binary that ships with:
 
 Each is optional; a missing binary means the built-in path, never an error.
 
+## What the write gate covers
+
+No file lands on disk unless it still parses. In tier order: a checker you configure
+(`AGENT_CHECK_<EXT>`), then the language's own syntax-only tool, then nothing — and
+"nothing" is reported, never assumed.
+
+| language | checked by |
+|---|---|
+| Almide, Go | gramide (or `almide check` / `gofmt -e` when it is absent) |
+| Rust | `rustfmt --emit stdout` — it parses without resolving, so an unresolved `use crate::…` still passes |
+| Python, Ruby, JavaScript, PHP, Lua, shell, JSON, TOML | the tool each ships |
+| Java, C++ | nothing yet: their compilers need the whole project to tell a syntax error from a missing symbol, and one that refuses a correct edit is worse than none |
+
 ## Status
 
 Honest: this is a port, and it is not yet measured against what it was ported from.
