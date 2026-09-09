@@ -209,6 +209,15 @@ test "json parsing tolerates fences, prose and trailing commas" {
   assert(result.is_err(parse_json("nothing here")))
 }
 
+test "a transport timeout is classified as one, so the retry shrinks" {
+  // llm.transport_error(28, …) is what a curl deadline produces; ask must
+  // read it as a server timeout, or the retry would grow instead of shrink
+  assert(is_server_timeout(llm.transport_error(28, "")))
+  assert(is_transient(llm.transport_error(28, "")))
+  assert(not is_server_timeout(llm.transport_error(6, "could not resolve host")))
+  assert(is_transient("status 503: down"))
+}
+
 test "truncation detection and the effort ladder" {
   assert(looks_truncated("{\"a\": \"unterminated"))
   assert(not looks_truncated("{\"a\": 1}"))

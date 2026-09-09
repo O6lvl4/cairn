@@ -10,10 +10,11 @@
 // Error messages keep the shapes ask.almd classifies on: `status NNN:`,
 // `Request timeout`, `truncated before any content`.
 
-import http
 import json
 import env
 import regex
+import fs
+import self.observe
 import datetime
 
 type Price = { input: Float, output: Float, cached: Float }        // USD per Mtok
@@ -58,9 +59,6 @@ effect fn credentials_from_env() -> Credentials? = {
   else if email != "" and key != "" then some(Credentials { account_id: account, token: "", email: email, key: key })
   else none
 }
-
-fn endpoint_for(account_id: String) -> String =
-  "https://api.cloudflare.com/client/v4/accounts/" + account_id + "/ai/v1/chat/completions"
 
 type Request = { prompt: String, system: String, model: String, max_output_tokens: Int, reasoning_effort: String, schema: Value? }
 type Response = { text: String, cost_usd: Float, input_tokens: Int, output_tokens: Int, duration_ms: Int }
@@ -195,42 +193,81 @@ fn settle(c: Completion, model: String, duration_ms: Int) -> Result[Response, St
   }
 }
 
-// The runtime's OpenAI-compatible SSE helper returns one flat JSON object:
-// {"content", "model", "usage": {prompt_tokens, completion_tokens, total_tokens},
-//  "finish_reason", "tool_calls"}. It drops `neurons` and `reasoning_content`,
-// so cost comes from the price table here. (The lower-level
-// http.request_stream cannot take a capturing callback from Almide code
-// today — its bound is FnMut, the lambda renders as Rc<dyn Fn> — which is
-// why the helper is used even though it keeps less of the stream.)
-fn parse_assembled(body: String) -> Result[Completion, String] = {
-  let j = json.parse(body) |> result.map_err((e) => "decode assembled stream: " + e + "; raw: " + string.take(body, 200))!
-  let content = json.get_string(j, "content") ?? ""
-  let finish = json.get_string(j, "finish_reason") ?? ""
-  if content == "" and finish == "" then err("empty response: " + string.take(body, 300))
-  else ok(Completion { content: content, reasoning: "", finish: finish, usage: ok_of(value.field(j, "usage")) })
-}
+// Whole-request ceiling. Streaming makes a request as long as the generation.
+let TOTAL_TIMEOUT_S = 1800
+// Silence ceiling. A stream that sends nothing for two minutes is dead.
+let IDLE_TIMEOUT_S = 120
 
-// `HTTP 408 …` / `408 Request timeout` / anything naming a status → `status NNN: …`
-fn classify_transport(e: String) -> String = match regex.find("(4\\d\\d|5\\d\\d)", e) {
-  some(code) => "status " + code + ": " + string.take(e, 500),
-  none => "transport: " + string.take(e, 500),
-}
+fn endpoint_for(account_id: String) -> String =
+  "https://api.cloudflare.com/client/v4/accounts/" + account_id + "/ai/v1/chat/completions"
 
-fn base_url_for(account_id: String) -> String =
-  "https://api.cloudflare.com/client/v4/accounts/" + account_id + "/ai/v1"
-
-// One call, streamed end to end by the runtime and folded into a response.
-effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
-  if creds.token == "" then err("a CLOUDFLARE_API_TOKEN is required (the Global API Key is not supported on the streaming path)")
+// The request as a curl config file.
+//
+// curl, not `http.openai_streaming_call`, for three reasons measured here:
+// the intrinsic takes no deadline and a stalled stream hung the agent for
+// eighteen minutes; it folds the stream itself and drops `neurons` (the
+// meter Cloudflare bills), `reasoning_content` and the cached-token counts;
+// and it cannot be given an idle timeout. `--max-time` bounds the whole
+// request, and `--speed-limit 1 --speed-time N` ends a stream that has gone
+// quiet — a stream that talks every second for twenty minutes is alive, one
+// that says nothing for two is not.
+//
+// A config file rather than arguments: the token would otherwise sit in the
+// process list for anyone running `ps`.
+fn curl_config(creds: Credentials, body_path: String, sse_path: String) -> String = {
+  var lines = [
+    "url = " + quoted(endpoint_for(creds.account_id)),
+    "request = \"POST\"",
+    "header = \"Content-Type: application/json\"",
+  ]
+  if creds.token != "" then list.push(lines, "header = " + quoted("Authorization: Bearer " + creds.token))
   else {
-    let t0 = env.millis()
-    match http.openai_streaming_call(base_url_for(creds.account_id), creds.token, build_body(req), (_delta: String) => ()) {
-      err(e) => err(classify_transport(e)),
-      ok(body) => match parse_assembled(body) {
-        err(e) => err(e),
-        ok(c) => settle(c, req.model, env.millis() - t0),
-      },
-    }
+    list.push(lines, "header = " + quoted("X-Auth-Email: " + creds.email))
+    list.push(lines, "header = " + quoted("X-Auth-Key: " + creds.key))
+  }
+  list.push(lines, "data = " + quoted("@" + body_path))
+  list.push(lines, "output = " + quoted(sse_path))
+  list.push(lines, "max-time = " + int.to_string(TOTAL_TIMEOUT_S))
+  list.push(lines, "speed-limit = 1")
+  list.push(lines, "speed-time = " + int.to_string(IDLE_TIMEOUT_S))
+  list.push(lines, "silent")
+  list.push(lines, "show-error")
+  list.push(lines, "no-buffer")
+  list.push(lines, "write-out = \"%{http_code}\"")
+  string.join(lines, "\n") + "\n"
+}
+
+fn quoted(s: String) -> String = "\"" + string.replace(string.replace(s, "\\", "\\\\"), "\"", "\\\"") + "\""
+
+// curl's own exit codes, in the vocabulary ask.almd classifies on.
+fn transport_error(code: Int, said: String) -> String =
+  if code == 28 then "request timeout: no answer within " + int.to_string(TOTAL_TIMEOUT_S) + "s, or no bytes for " + int.to_string(IDLE_TIMEOUT_S) + "s"
+  else "transport: curl exit " + int.to_string(code) + (if said == "" then "" else ": " + string.take(said, 300))
+
+// A streamed body folds; a non-streamed one parses. (A pure fn: an `if`
+// binding a Result inside an effect fn trips the auto-`?` insertion.)
+fn fold_body(text: String) -> Result[Completion, String] =
+  if string.starts_with(string.trim_start(text), "data:") then assemble_stream(text) else parse_completion(text)
+
+// One call: request to a file, stream to a file, both removed afterwards.
+effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
+  let t0 = env.millis()
+  let body_path = fs.create_temp_file("agent-req") |> result.map_err((e) => "temp file: " + e)!
+  let sse_path = fs.create_temp_file("agent-sse") |> result.map_err((e) => "temp file: " + e)!
+  let cfg_path = fs.create_temp_file("agent-cfg") |> result.map_err((e) => "temp file: " + e)!
+  fs.write(body_path, build_body(req)) |> result.map_err((e) => "write request: " + e)!
+  fs.write(cfg_path, curl_config(creds, body_path, sse_path)) |> result.map_err((e) => "write config: " + e)!
+  let r = observe.run("curl --config " + observe.shell_quote(cfg_path), ".", (TOTAL_TIMEOUT_S + 30) * 1000)!
+  let sse = fs.read_text(sse_path) ?? ""
+  let _ = fs.remove(body_path)
+  let _ = fs.remove(cfg_path)
+  let _ = fs.remove(sse_path)
+  let status = int.parse(string.trim(r.stdout)) ?? 0
+  if r.code != 0 then err(transport_error(r.code, string.trim(r.stderr)))
+  else if status < 200 or status >= 300 then err("status " + int.to_string(status) + ": " + string.take(string.trim(sse), 500))
+  else match fold_body(sse) {
+    err(e) => err(e),
+    ok(c) => settle(c, req.model, env.millis() - t0),
   }
 }
 
