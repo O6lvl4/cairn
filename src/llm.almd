@@ -252,9 +252,9 @@ fn fold_body(text: String) -> Result[Completion, String] =
 // One call: request to a file, stream to a file, both removed afterwards.
 effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
   let t0 = env.millis()
-  let body_path = fs.create_temp_file("agent-req") |> result.map_err((e) => "temp file: " + e)!
-  let sse_path = fs.create_temp_file("agent-sse") |> result.map_err((e) => "temp file: " + e)!
-  let cfg_path = fs.create_temp_file("agent-cfg") |> result.map_err((e) => "temp file: " + e)!
+  let body_path = fs.create_temp_file("mendide-req") |> result.map_err((e) => "temp file: " + e)!
+  let sse_path = fs.create_temp_file("mendide-sse") |> result.map_err((e) => "temp file: " + e)!
+  let cfg_path = fs.create_temp_file("mendide-cfg") |> result.map_err((e) => "temp file: " + e)!
   fs.write(body_path, build_body(req)) |> result.map_err((e) => "write request: " + e)!
   fs.write(cfg_path, curl_config(creds, body_path, sse_path)) |> result.map_err((e) => "write config: " + e)!
   let r = observe.run("curl --config " + observe.shell_quote(cfg_path), ".", (TOTAL_TIMEOUT_S + 30) * 1000)!

@@ -77,7 +77,7 @@ effect fn failure_view(command: String, raw: String, root: String, tail_lines: I
   let text = string.trim(raw)
   var summary = ""
   if string.len(text) > 2000 and on_path("ctxgate")! then {
-    match fs.create_temp_file("agent-out") {
+    match fs.create_temp_file("mendide-out") {
       ok(tmp) => {
         let _ = fs.write(tmp, text)
         let r = observe.run("ctxgate summarize " + observe.shell_quote(if command == "" then "verify" else command) + " < " + observe.shell_quote(tmp), root, 20000)!

@@ -1,9 +1,9 @@
-// agent — observe, then act.
+// mendide — observe, then act.
 //
-//   agent solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
-//                      [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
-//   agent observe      [--root DIR] [--verify CMD]
-//   agent llm-test
+//   mendide solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
+//                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
+//   mendide observe      [--root DIR] [--verify CMD]
+//   mendide llm-test
 
 import env
 import process
@@ -14,12 +14,12 @@ import self.observe
 import self.solve
 
 let USAGE = """
-agent — observe, then act
+mendide — observe, then act
 
-  agent solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
-                      [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
-  agent observe       [--root DIR] [--verify CMD]
-  agent llm-test
+  mendide solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
+                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
+  mendide observe       [--root DIR] [--verify CMD]
+  mendide llm-test
 
 Options
   --root DIR      project root (default: cwd)

@@ -26,7 +26,7 @@ AGENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ALMIDE="${ALMIDE:-$HOME/workspace/github.com/almide/almide}"
 EXDIR="$ALMIDE/research/benchmark/exercises"
 CHEAT="$ALMIDE/docs/CHEATSHEET.md"
-WORK="${BENCH_WORK:-${TMPDIR:-/tmp}/agent-almide}"
+WORK="${BENCH_WORK:-${TMPDIR:-/tmp}/mendide-almide}"
 LIMIT="${BENCH_LIMIT:-0}"
 JOBS="${BENCH_JOBS:-3}"
 ATTEMPTS="${BENCH_ATTEMPTS:-6}"
@@ -101,7 +101,7 @@ $sigs"
   # directory does not have: under 0.62 it exits 1 without running anything.
   # Naming the file is what actually runs the tests.
   local vc="almide test $base"
-  ( "$AGENT_ROOT/agent" solve "$task" --root "$d" --verify "$vc" "${mode[@]}" ) > "$log" 2>&1
+  ( "$AGENT_ROOT/mendide" solve "$task" --root "$d" --verify "$vc" "${mode[@]}" ) > "$log" 2>&1
 
   local result=FAIL
   if ( cd "$d" && almide test "$base" ) >/dev/null 2>&1; then result=PASS; fi

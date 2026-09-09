@@ -1,6 +1,6 @@
 // The write gate: no file lands on disk unless it still parses.
 //
-//   1. a configured command — `AGENT_CHECK_<EXT>="ruff check {}"`
+//   1. a configured command — `MENDIDE_CHECK_<EXT>="ruff check {}"`
 //      (FAMULUS5_CHECK_<EXT> / FAMULUS4_CHECK_<EXT> honoured too)
 //   2. a built-in syntax-only command the language ships (never a
 //      compiler: `rustc` on one file of a project fails on `use crate::…`)
@@ -51,10 +51,10 @@ let NONE = Checker { label: "", program: "", args: [] }
 
 effect fn on_path(bin: String) -> Bool = (observe.run("command -v " + bin, ".", 5000)!).code == 0
 
-// `AGENT_CHECK_PY="ruff check {}"` overrides the built-in for `.py`.
+// `MENDIDE_CHECK_PY="ruff check {}"` overrides the built-in for `.py`.
 effect fn configured(ext: String) -> Checker? = {
   let key = string.to_upper(ext)
-  let raw = string.trim(env.get("AGENT_CHECK_" + key) ?? env.get("FAMULUS5_CHECK_" + key) ?? env.get("FAMULUS4_CHECK_" + key) ?? "")
+  let raw = string.trim(env.get("MENDIDE_CHECK_" + key) ?? env.get("FAMULUS5_CHECK_" + key) ?? env.get("FAMULUS4_CHECK_" + key) ?? "")
   if raw == "" then none
   else {
     let parts = list.filter(string.split(raw, " "), (p) => p != "")
@@ -132,7 +132,7 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
   let dir = match string.last_index_of(path, "/") { some(i) => string.take(path, i), none => "." }
   let name = list.last(string.split(path, "/")) ?? path
   let ext = observe.extension_of(path)
-  let tmp = dir + "/." + name + ".agent.tmp" + (if ext == "" then "" else "." + ext)
+  let tmp = dir + "/." + name + ".mendide.tmp" + (if ext == "" then "" else "." + ext)
   fs.write(tmp, source) |> result.map_err((e) => "edit.write: " + e)!
   let v = run_checker(c, tmp)!
   if v.kind == "invalid" then {

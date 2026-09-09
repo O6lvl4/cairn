@@ -1,4 +1,4 @@
-# agent
+# mendide
 
 A coding agent written in [Almide](https://github.com/almide/almide): one static
 binary, no runtime to install, and every part of it — the parser it gates writes
@@ -6,9 +6,9 @@ with, the reader it shows files through, the summariser it compresses failures w
 — is a program in the same language.
 
 ```
-agent solve "the clamp test fails for out-of-range values" --root ../project
-agent observe --root ../project     what it can establish without asking a model
-agent llm-test                      one call, to prove the credentials work
+mendide solve "the clamp test fails for out-of-range values" --root ../project
+mendide observe --root ../project     what it can establish without asking a model
+mendide llm-test                      one call, to prove the credentials work
 ```
 
 ## What it does
@@ -51,7 +51,7 @@ Each is optional; a missing binary means the built-in path, never an error.
 ## What the write gate covers
 
 No file lands on disk unless it still parses. In tier order: a checker you configure
-(`AGENT_CHECK_<EXT>`), then the language's own syntax-only tool, then nothing — and
+(`MENDIDE_CHECK_<EXT>`), then the language's own syntax-only tool, then nothing — and
 "nothing" is reported, never assumed.
 
 | language | checked by |
@@ -86,7 +86,7 @@ The seeded-bug check passes too: one attempt, five seconds, two hundredths of a 
 ## Build
 
 ```
-almide build          # → ./agent
+almide build          # → ./mendide
 almide test           # 7 modules
 ```
 

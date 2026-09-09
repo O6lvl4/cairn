@@ -1,13 +1,13 @@
-# agent
+# mendide
 
 [Almide](https://github.com/almide/almide) で書かれたコーディングエージェント。単一の静的バイナリで、
 入れるべきランタイムはありません。書き込みを止める構文ゲートも、ファイルを見せるリーダも、失敗を
 圧縮する要約器も、すべて同じ言語のプログラムです。
 
 ```
-agent solve "clamp のテストが範囲外の値で落ちる" --root ../project
-agent observe --root ../project     モデルに聞かずに分かることを全部
-agent llm-test                      1 回だけ呼んで資格情報を確かめる
+mendide solve "clamp のテストが範囲外の値で落ちる" --root ../project
+mendide observe --root ../project     モデルに聞かずに分かることを全部
+mendide llm-test                      1 回だけ呼んで資格情報を確かめる
 ```
 
 ## 何をするか
@@ -39,7 +39,7 @@ agent llm-test                      1 回だけ呼んで資格情報を確かめ
 
 ## 書き込みゲートの範囲
 
-パースできないファイルはディスクに着地しません。順に、設定したチェッカ（`AGENT_CHECK_<EXT>`）、
+パースできないファイルはディスクに着地しません。順に、設定したチェッカ（`MENDIDE_CHECK_<EXT>`）、
 その言語自身の構文専用ツール、そして無し。「無し」は黙って仮定せず、そう報告します。
 
 | 言語 | 何で見るか |
@@ -71,7 +71,7 @@ famulus5 は 84〜85%）で、`bench/exercism.sh` は移植済み、あとはコ
 ## ビルド
 
 ```
-almide build          # → ./agent
+almide build          # → ./mendide
 almide test           # 7 モジュール
 ```
 
