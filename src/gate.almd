@@ -4,7 +4,8 @@
 //      (FAMULUS5_CHECK_<EXT> / FAMULUS4_CHECK_<EXT> honoured too)
 //   2. a built-in syntax-only command the language ships (never a
 //      compiler: `rustc` on one file of a project fails on `use crate::…`)
-//      — gramide for Almide and Go when it is on PATH, else the toolchain's
+//      — gramide for the languages it has a grammar for when it is on PATH,
+//        else the toolchain's
 //   3. otherwise the write proceeds and says it was unchecked.
 //
 // A write goes to a same-directory temp file that keeps the real extension
@@ -23,8 +24,12 @@ type Checker = { label: String, program: String, args: List[String] }   // `{}` 
 // that is not one — it parses and never resolves, so it takes a file with
 // unresolved imports (exit 0) and refuses an unclosed delimiter (exit 1).
 // Java and C++ have no such tool and are left ungated, said out loud.
+// The edition matters: `--edition 2021` refuses a let chain, which is valid
+// Rust 2024, so a correct write was being refused. 2024 is the current one and
+// the least likely to reject code someone is writing today. gramide sits ahead
+// of this and takes no position on editions at all.
 let BUILTIN = [
-  ("rs", "rust", "rustfmt", ["--emit", "stdout", "--edition", "2021", "{}"]),
+  ("rs", "rust", "rustfmt", ["--emit", "stdout", "--edition", "2024", "{}"]),
   ("py", "python", "python3", ["-m", "py_compile", "{}"]),
   ("pyi", "python", "python3", ["-m", "py_compile", "{}"]),
   ("rb", "ruby", "ruby", ["-c", "{}"]),
@@ -46,6 +51,14 @@ let BUILTIN = [
 // and literals, so it catches a generation that stopped halfway or answered
 // with prose, and passes anything a compiler would parse.
 let BALANCE_EXTS = ["java", "cpp", "cc", "cxx", "hpp", "hh", "h", "c", "cs", "kt", "scala", "swift", "ts", "tsx", "m", "mm"]
+
+// What gramide has a grammar for. It is preferred over the language's own tool
+// for these because a gate must never refuse correct code, and gramide answers
+// about syntax alone: it holds no opinion on which edition reserves which word,
+// or on whether an import resolves. Measured against `rustfmt --edition 2024`
+// on 827 files of real Rust, the two agree on all but one, which gramide
+// accepts and rustfmt refuses for using `gen` as a name.
+let GRAMIDE_EXTS = ["almd", "go", "rs"]
 
 let NONE = Checker { label: "", program: "", args: [] }
 
@@ -72,7 +85,7 @@ effect fn checker_for(path: String) -> Checker = {
   else match configured(ext)! {
     some(c) => c,
     none =>
-      if (ext == "almd" or ext == "go") and on_path("gramide")! then Checker { label: "gramide", program: "gramide", args: ["check", "{}"] }
+      if list.contains(GRAMIDE_EXTS, ext) and on_path("gramide")! then Checker { label: "gramide", program: "gramide", args: ["check", "{}"] }
       else match list.find(BUILTIN, (b) => b.0 == ext) {
         some((_, label, program, args)) => Checker { label: label, program: program, args: args },
         none => if list.contains(BALANCE_EXTS, ext) and on_path("gramide")! then Checker { label: "balance", program: "gramide", args: ["balance", "{}"] } else NONE,
@@ -85,7 +98,8 @@ effect fn checker_for(path: String) -> Checker = {
 // reject a correct file for a missing symbol cannot refuse anything here —
 // it only gets to say why the refusal happened. gramide answers "unexpected
 // `&&`"; `almide check` answers "operator '&&' has been removed. Use 'and'".
-let SECOND_OPINION = [("almd", "almide", "almide check")]
+let SECOND_OPINION = [("almd", "almide", "almide check"),
+  ("rs", "rustfmt", "rustfmt --emit stdout --edition 2024")]
 
 type Verdict = { kind: String, why: String }   // ok | invalid | unavailable
 
@@ -155,6 +169,21 @@ test "the gate covers the languages it claims to" {
   assert(list.contains(BALANCE_EXTS, "java"))
   assert(list.contains(BALANCE_EXTS, "cpp"))
   assert(not list.contains(BALANCE_EXTS, "rs"))
+}
+
+test "the tiers do not overlap, and gramide is the first of them" {
+  // A grammar beats a language tool, which beats brackets. `rs` is in two
+  // tables on purpose: gramide gates it, rustfmt only explains a refusal.
+  assert(list.contains(GRAMIDE_EXTS, "rs"))
+  assert(list.contains(GRAMIDE_EXTS, "go"))
+  assert(list.contains(GRAMIDE_EXTS, "almd"))
+  assert(not list.any(GRAMIDE_EXTS, (e) => list.contains(BALANCE_EXTS, e)))
+  // rustfmt is still in BUILTIN so a machine without gramide is not ungated
+  assert(list.any(BUILTIN, (b) => b.0 == "rs"))
+  // every second opinion is on a language gramide gates, or it never runs
+  assert(list.all(SECOND_OPINION, (s) => list.contains(GRAMIDE_EXTS, s.0)))
+  // the edition that refused correct Rust 2024, never again
+  assert(list.all(BUILTIN, (b) => not list.contains(b.3, "2021")))
 }
 
 test "configured checker parsing adds the placeholder" {
