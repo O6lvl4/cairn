@@ -100,9 +100,9 @@ fn parse_json(raw: String) -> Result[Value, String] = {
   }
 }
 
-// Raw model traffic, on MENDIDE_DEBUG.
+// Raw model traffic, on CAIRN_DEBUG (MENDIDE_DEBUG still works).
 effect fn debug(label: String, body: String) -> Unit =
-  if (env.get("MENDIDE_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---") else ()
+  if (env.get("CAIRN_DEBUG") ?? env.get("MENDIDE_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---") else ()
 
 type Asked = { value: Value, cost_usd: Float }
 

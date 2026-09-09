@@ -101,8 +101,8 @@ type CommandResult = { command: String, code: Int, stdout: String, stderr: Strin
 // 3.0 seconds. A test suite that starts a server is the ordinary case here.
 effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = {
   let t0 = env.millis()
-  let out_path = fs.create_temp_file("mendide-stdout") ?? ""
-  let err_path = fs.create_temp_file("mendide-stderr") ?? ""
+  let out_path = fs.create_temp_file("cairn-stdout") ?? ""
+  let err_path = fs.create_temp_file("cairn-stderr") ?? ""
   let redirect = if out_path == "" or err_path == "" then ""
     else " > " + shell_quote(out_path) + " 2> " + shell_quote(err_path)
   // a subshell, not a brace group: `{ cmd & ; }` is a bash syntax error and a

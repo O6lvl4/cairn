@@ -1,13 +1,13 @@
-# mendide
+# cairn
 
 [Almide](https://github.com/almide/almide) で書かれたコーディングエージェント。単一の静的バイナリで、
 入れるべきランタイムはありません。書き込みを止める構文ゲートも、ファイルを見せるリーダも、失敗を
 圧縮する要約器も、すべて同じ言語のプログラムです。
 
 ```
-mendide solve "clamp のテストが範囲外の値で落ちる" --root ../project
-mendide observe --root ../project     モデルに聞かずに分かることを全部
-mendide llm-test                      1 回だけ呼んで資格情報を確かめる
+cairn solve "clamp のテストが範囲外の値で落ちる" --root ../project
+cairn observe --root ../project     モデルに聞かずに分かることを全部
+cairn llm-test                      1 回だけ呼んで資格情報を確かめる
 ```
 
 ## 何をするか
@@ -32,14 +32,14 @@ mendide llm-test                      1 回だけ呼んで資格情報を確か�
 
 - **[gramide](https://github.com/O6lvl4/gramide)** — 構文ゲートとリポジトリ地図。Almide 製のパーサで、
   コーパス検証済み、ネイティブライブラリなし。
-- **[peek](https://github.com/O6lvl4/peek)** — 構造を意識した読み取り（入っていれば）。
+- **[hew](https://github.com/O6lvl4/hew)** — 構造を意識した読み取り（入っていれば）。
 - **[ctxgate](https://github.com/O6lvl4/ctxgate)** — 判定を先に置く失敗要約（入っていれば）。
 
 いずれも任意です。バイナリが無ければ組み込みの経路に落ちるだけで、エラーにはなりません。
 
 ## 書き込みゲートの範囲
 
-パースできないファイルはディスクに着地しません。順に、設定したチェッカ（`MENDIDE_CHECK_<EXT>`）、
+パースできないファイルはディスクに着地しません。順に、設定したチェッカ（`CAIRN_CHECK_<EXT>`）、
 その言語自身の構文専用ツール、そして無し。「無し」は黙って仮定せず、そう報告します。
 
 | 言語 | 何で見るか |
@@ -71,7 +71,7 @@ famulus5 は 84〜85%）で、`bench/exercism.sh` は移植済み、あとはコ
 ## ビルド
 
 ```
-almide build          # → ./mendide
+almide build          # → ./cairn
 almide test           # 7 モジュール
 ```
 

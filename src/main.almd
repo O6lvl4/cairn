@@ -1,9 +1,9 @@
-// mendide — observe, then act.
+// cairn — observe, then act.
 //
-//   mendide solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
+//   cairn solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
 //                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
-//   mendide observe      [--root DIR] [--verify CMD]
-//   mendide llm-test
+//   cairn observe      [--root DIR] [--verify CMD]
+//   cairn llm-test
 
 import env
 import process
@@ -14,12 +14,12 @@ import self.observe
 import self.solve
 
 let USAGE = """
-mendide — observe, then act
+cairn — observe, then act
 
-  mendide solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
+  cairn solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
                         [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
-  mendide observe       [--root DIR] [--verify CMD]
-  mendide llm-test
+  cairn observe       [--root DIR] [--verify CMD]
+  cairn llm-test
 
 Options
   --root DIR      project root (default: cwd)

@@ -77,7 +77,7 @@ effect fn failure_view(command: String, raw: String, root: String, tail_lines: I
   let text = string.trim(raw)
   var summary = ""
   if string.len(text) > 2000 and on_path("ctxgate")! then {
-    match fs.create_temp_file("mendide-out") {
+    match fs.create_temp_file("cairn-out") {
       ok(tmp) => {
         let _ = fs.write(tmp, text)
         let r = observe.run("ctxgate summarize " + observe.shell_quote(if command == "" then "verify" else command) + " < " + observe.shell_quote(tmp), root, 20000)!
@@ -157,16 +157,16 @@ effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Obs
 effect fn render_files(root: String, paths: List[String], quiet: Bool) -> (String, List[String]) = {
   var chunks: List[String] = []
   var read: List[String] = []
-  let peek = on_path("peek")!
+  let hew = on_path("hew")!
   for p in paths {
     let r = observe.read_for_model(root, p, 24000)!
     if r.error != "" then note(quiet, "rejected " + p + ": " + r.error)!
     else {
       list.push(read, p)
       var outline = ""
-      if peek and (r.truncated or list.len(string.split(r.content, "\n")) > 300) then {
-        let o = observe.run("peek outline " + observe.shell_quote(p), root, 20000)!
-        if o.code == 0 and string.trim(o.stdout) != "" then outline = "--- " + p + ": outline (peek) ---\n" + string.trim_end(o.stdout) + "\n\n" else ()
+      if hew and (r.truncated or list.len(string.split(r.content, "\n")) > 300) then {
+        let o = observe.run("hew outline " + observe.shell_quote(p), root, 20000)!
+        if o.code == 0 and string.trim(o.stdout) != "" then outline = "--- " + p + ": outline (hew) ---\n" + string.trim_end(o.stdout) + "\n\n" else ()
       } else ()
       list.push(chunks, outline + "--- " + p + (if r.truncated then " (TRUNCATED — this is only the first part)" else "") + " ---\n" + r.content)
     }
