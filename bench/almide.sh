@@ -97,10 +97,14 @@ $sigs"
   local log="$WORK/$ex.log"
   local mode=(--attempts "$ATTEMPTS")
   [ -n "$AGENT" ] && mode=(--agent --steps "$STEPS")
-  ( "$AGENT_ROOT/agent" solve "$task" --root "$d" --verify "almide test" "${mode[@]}" ) > "$log" 2>&1
+  # `almide test` with no argument needs an almide.toml, which an exercise
+  # directory does not have: under 0.62 it exits 1 without running anything.
+  # Naming the file is what actually runs the tests.
+  local vc="almide test $base"
+  ( "$AGENT_ROOT/agent" solve "$task" --root "$d" --verify "$vc" "${mode[@]}" ) > "$log" 2>&1
 
   local result=FAIL
-  if ( cd "$d" && almide test ) >/dev/null 2>&1; then result=PASS; fi
+  if ( cd "$d" && almide test "$base" ) >/dev/null 2>&1; then result=PASS; fi
 
   local cost attempts read_cheat
   cost=$(grep -oE '\$[0-9]+\.[0-9]+' "$log" | tail -1 | tr -d '$'); [ -z "$cost" ] && cost=0
@@ -135,8 +139,17 @@ for mode in original stripped; do
   else
     strip_impl "$probe_src" "$d/$(basename "$probe_src")" 2>/dev/null
   fi
-  ( cd "$d" && almide test ) >/dev/null 2>&1
-  printf '  %-16s %-10s exit=%d\n' "$probe" "$mode" "$?"
+  ( cd "$d" && almide test "$(basename "$probe_src")" ) >/dev/null 2>&1
+  code=$?
+  printf '  %-16s %-10s exit=%d\n' "$probe" "$mode" "$code"
+  # A harness that cannot tell a working exercise from a stubbed one
+  # reports a number that means nothing. Assert, do not print and continue.
+  if [ "$mode" = original ] && [ "$code" -ne 0 ]; then
+    echo "  the untouched exercise does not pass — the harness is broken" >&2; exit 2
+  fi
+  if [ "$mode" = stripped ] && [ "$code" -eq 0 ]; then
+    echo "  the stripped exercise passes — the harness proves nothing" >&2; exit 2
+  fi
 done
 echo
 

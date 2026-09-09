@@ -125,6 +125,9 @@ let HARNESS_BROKEN = [
   ("go: cannot find main module|go\\.mod file not found", "not inside a Go module"),
   ("bundler: command not found|could not find gem", "Ruby gems are not installed"),
   ("no such file or directory\\s*$", "a required file is missing"),
+  // a build tool that found no project ran nothing at all
+  ("no almide\\.toml found|run 'almide init'", "the directory is not an Almide project (no almide.toml)"),
+  ("no targets specified and no makefile found", "there is no Makefile here"),
 ]
 
 // Why this result should not be read as "the code is wrong"; "" when it ran.
@@ -230,6 +233,8 @@ test "noise, harness failures, omitted directories" {
   assert(not is_noise("src/main.py"))
   let r = CommandResult { command: "pytest", code: 1, stdout: "", stderr: "bash: pytest: command not found", timed_out: false, duration_ms: 1, spawn_error: "" }
   assert(string.starts_with(harness_failure(r), "the command is not on PATH"))
+  let no_project = CommandResult { command: "almide test", code: 1, stdout: "No file specified and no almide.toml found.\nRun 'almide init' to create a project.", stderr: "", timed_out: false, duration_ms: 1, spawn_error: "" }
+  assert(string.starts_with(harness_failure(no_project), "the directory is not an Almide project"))
   let ok_r = CommandResult { command: "x", code: 1, stdout: "FAILED test_a", stderr: "", timed_out: false, duration_ms: 1, spawn_error: "" }
   assert_eq(harness_failure(ok_r), "")
   assert(string.contains(omitted_by_directory(["a/1", "a/2", "b/3", "c"], ["c"]), "a/ (2)"))
