@@ -48,7 +48,7 @@ fn render_explanations(xs: List[Explanation]) -> String =
 // at column 0; jest `●`, go `--- FAIL:`, pytest `___ name ___`, cargo
 // `---- name stdout ----`, catch2 a dashed rule.
 fn starts_diagnostic(l: String) -> Bool =
-  regex.is_match("^(error|warning)([^a-zA-Z0-9_]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701", l) or regex.is_match("^\\s{0,4}● ", l) or regex.is_match("^\\s*--- FAIL: ", l)
+  regex.is_match("^(error|warning)([^a-zA-Z0-9_]|$)", l) or regex.is_match("^\\s{0,4}● ", l) or regex.is_match("^\\s*--- FAIL: ", l)
   or regex.is_match("^_{3,} .+ _{3,}$", l) or regex.is_match("^---- .+ stdout ----$", l) or regex.is_match("^-{20,}$", l)
 
 // The first few whole diagnostics when the output is a list of them (the

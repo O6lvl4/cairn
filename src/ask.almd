@@ -17,10 +17,10 @@ type Options = { system: String, model: String, max_output_tokens: Int, reasonin
 
 // (Almide's regex has no case-insensitive flag, no word boundary and no backreference: subjects are lower-cased and
 // patterns written in lower case; word edges are spelled out where needed.)
-fn is_transient(m: String) -> Bool = regex.is_match("status (408|409|425|429|500|502|503|504)([^0-9]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701|request timeout|timed? out|econnreset|etimedout|eai_again|socket hang up", string.to_lower(m))
-fn is_server_timeout(m: String) -> Bool = regex.is_match("status 408([^0-9]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701|request timeout", string.to_lower(m))
+fn is_transient(m: String) -> Bool = regex.is_match("status (408|409|425|429|500|502|503|504)([^0-9]|$)|request timeout|timed? out|econnreset|etimedout|eai_again|socket hang up", string.to_lower(m))
+fn is_server_timeout(m: String) -> Bool = regex.is_match("status 408([^0-9]|$)|request timeout", string.to_lower(m))
 fn is_budget_truncation(m: String) -> Bool = regex.is_match("truncated before any content|raise max_completion_tokens", string.to_lower(m))
-fn is_rate_limit(m: String) -> Bool = regex.is_match("status 429([^0-9]|20 20 12 61 79 80 81 33 98 100 204 250 395 398 399 400 701|rate limit|too many requests", string.to_lower(m))
+fn is_rate_limit(m: String) -> Bool = regex.is_match("status 429([^0-9]|$)|rate limit|too many requests", string.to_lower(m))
 
 let EFFORTS = ["low", "medium", "high"]
 
