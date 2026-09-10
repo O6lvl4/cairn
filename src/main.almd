@@ -18,6 +18,7 @@ cairn — observe, then act
 
   cairn solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
                         [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
+  cairn polish [focus]  [--root DIR] [--verify CMD] [--files N] [--model M]
   cairn observe       [--root DIR] [--verify CMD]
   cairn llm-test
 
@@ -28,12 +29,13 @@ Options
   --files N       files read per attempt (default 6)
   --model M       model id (default cf:glm-5.3-flash)
   --create        allow creating files that do not exist
+  --polish N      extra attempts that only simplify a passing result (default 0; measured at a 2-byte diff on one task)
   --quiet         only the final report
   --files-seen N  paths shown to the model (default 400)
   --timeout SEC   how long the verify command may take (default 120)
 """
 
-let VALUED = ["root", "verify", "attempts", "files", "model", "files-seen", "timeout", "task"]
+let VALUED = ["root", "verify", "attempts", "files", "model", "files-seen", "timeout", "task", "polish"]
 
 type Args = { cmd: String, rest: List[String], flags: Map[String, String] }
 
@@ -102,10 +104,22 @@ effect fn run_solve(a: Args) -> Result[Int, String] = {
   let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
   let quiet = map.contains(a.flags, "quiet")
   if task == "" then err("solve needs a task description")
-  else solve_with(a, task, root, quiet)
+  else solve_with(a, task, root, quiet, false)
 }
 
-effect fn solve_with(a: Args, task: String, root: String, quiet: Bool) -> Result[Int, String] = {
+// The polish attempt on its own, for code that already passes. `solve` reaches
+// this only after a repair; a project that is already green could not be asked
+// for it at all, which made the pass impossible to try, measure or re-run.
+effect fn run_polish(a: Args) -> Result[Int, String] = {
+  let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
+  let quiet = map.contains(a.flags, "quiet")
+  let focus = string.trim(string.join(a.rest, " "))
+  let task = "Simplify the code without changing what it does."
+    + (if focus == "" then "" else " Concentrate on: " + focus)
+  solve_with(a, task, root, quiet, true)
+}
+
+effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_only: Bool) -> Result[Int, String] = {
   load_env(root)!
   let creds = llm.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")!
   let (rm, rmw) = repo_map(root, task)!
@@ -122,12 +136,24 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool) -> Result
     eprintln("\nthe verify command did not run: " + obs.harness_broken + "\n  $ " + obs.verify_command + "\n" + (option.map(obs.baseline, (b) => observe.tail(string.trim(b.stdout + "\n" + b.stderr), 10)) ?? "") + "\nFix the command (or the environment) and run again. Nothing the agent writes can change this outcome.")
     ok(3)
   }
-  else if option.map(obs.baseline, (b) => b.code == 0) ?? false then { println("\n" + obs.verify_command + " already passes — nothing was changed.\n  If there is work to do here, give a --verify that fails first."); ok(0) }
+  else if (option.map(obs.baseline, (b) => b.code == 0) ?? false) and not polish_only then { println("\n" + obs.verify_command + " already passes — nothing was changed.\n  If there is work to do here, give a --verify that fails first."); ok(0) }
+  else if polish_only and not (option.map(obs.baseline, (b) => b.code == 0) ?? false) then {
+    println("\n" + obs.verify_command + " does not pass — polish only rewrites code that already works.\n  Run `cairn solve` first, or give a --verify that passes.")
+    ok(3)
+  }
   else {
     let opts = solve.Options { max_attempts: int.parse(map.get(a.flags, "attempts") ?? "6") ?? 6, max_files: int.parse(map.get(a.flags, "files") ?? "6") ?? 6,
-      model: map.get(a.flags, "model") ?? ask.MODEL_WORK, allow_create: map.contains(a.flags, "create"), quiet: quiet }
+      model: map.get(a.flags, "model") ?? ask.MODEL_WORK, allow_create: map.contains(a.flags, "create"), quiet: quiet, polish_only: polish_only,
+      polish: int.parse(map.get(a.flags, "polish") ?? "0") ?? 0 }
     let r = solve.solve(creds, task, obs, opts)!
-    println("\n" + (if r.ok then "SOLVED" else "NOT SOLVED") + " in " + int.to_string(list.len(r.attempts)) + " attempt(s), " + usd(r.cost_usd) + ", " + int.to_string(r.wall_ms / 1000) + "s")
+    // A rolled-back polish leaves the tree exactly as it found it, which is not
+    // the same news as a repair that landed.
+    let headline = match r.polish_kept {
+      some(kept) => if polish_only then (if kept then "POLISHED" else "UNCHANGED — the simpler version did not pass")
+                    else (if r.ok then (if kept then "SOLVED, and the simpler version kept" else "SOLVED, the polish rolled back") else "NOT SOLVED"),
+      none => if r.ok then "SOLVED" else "NOT SOLVED",
+    }
+    println("\n" + headline + " in " + int.to_string(list.len(r.attempts)) + " attempt(s), " + usd(r.cost_usd) + ", " + int.to_string(r.wall_ms / 1000) + "s")
     if not list.is_empty(r.changed) then println("changed: " + string.join(r.changed, ", ")) else ()
     for w in r.warnings { println("WARNING: " + w) }
     if r.harness_broken != "" then println("the verify command stopped working mid-run: " + r.harness_broken + "\nthe edits on disk were never actually checked.")
@@ -153,5 +179,6 @@ effect fn main() -> Unit = {
   else if a.cmd == "llm-test" then finish(result.map(llm_test(), (_) => 0))
   else if a.cmd == "observe" then finish(result.map(run_observe(a), (_) => 0))
   else if a.cmd == "solve" then finish(run_solve(a))
+  else if a.cmd == "polish" then finish(run_polish(a))
   else { eprintln("unknown command: " + a.cmd + "\n" + USAGE); process.exit(1) }
 }

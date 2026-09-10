@@ -1,0 +1,128 @@
+// The language reference: what the model is shown so it does not have to guess
+// the syntax of a language it has never seen.
+//
+//   1. a configured file — `CAIRN_REFERENCE_<LANGUAGE>=/path/to/notes.md`
+//   2. a reference the project already carries — CHEATSHEET.md at its root
+//   3. one the toolchain will print — `almide ide stdlib-snapshot` for Almide,
+//      which documents itself as intended for exactly this
+//
+// Nothing is invented. A language with no reference gets none, and the
+// observation says which tier answered.
+
+import env
+import fs
+import self.observe
+
+type Reference = { label: String, text: String }
+
+let NONE = Reference { label: "", text: "" }
+
+// How much of a reference is worth sending. Almide's quick reference is ~41 KB
+// and its stdlib snapshot ~14 KB, so both arrive whole; its llms.txt is 213 KB,
+// which would spend the whole attempt budget on the reference instead of on the
+// code. The cap is what separates the two, not a judgement about either.
+let MAX_CHARS = 48000
+
+// Files a project uses to carry its own reference, most specific first.
+let IN_PROJECT: List[String] = ["CHEATSHEET.md", "docs/CHEATSHEET.md", "CHEATSHEET.txt"]
+
+// language → the binary that must be on PATH, and the commands that might print
+// a reference for it, best first. A command a toolchain does not have exits
+// non-zero and the next one is tried, so a toolchain that grows a better
+// reference is picked up without a change here.
+let TOOLCHAIN: List[(String, String, List[String])] = [
+  ("almide", "almide", ["almide ide cheatsheet", "almide ide stdlib-snapshot"]),
+]
+
+// `c++` is a language; `CAIRN_REFERENCE_C__` is the variable that overrides it.
+fn env_key(language: String) -> String = {
+  var out = ""
+  for c in string.chars(string.to_upper(language)) {
+    out = out + (if string.is_alphanumeric(c) then c else "_")
+  }
+  out
+}
+
+fn clip(text: String, label: String) -> Reference = {
+  let n = string.len(text)
+  if n <= MAX_CHARS then Reference { label: label, text: text }
+  else Reference {
+    label: label + " (first " + int.to_string(MAX_CHARS) + " of " + int.to_string(n) + " chars)",
+    text: string.take(text, MAX_CHARS),
+  }
+}
+
+effect fn on_path(bin: String) -> Bool = (observe.run("command -v " + bin, ".", 5000)!).code == 0
+
+// `CAIRN_REFERENCE_ALMIDE=off` asks for no reference at all, which is what the
+// no-reference arm of a comparison needs; an unset variable only means "look
+// in the next tier".
+fn is_off(v: String) -> Bool = { let s = string.to_lower(string.trim(v)); s == "off" or s == "none" }
+
+effect fn configured(language: String) -> Reference = {
+  let path = string.trim(env.get("CAIRN_REFERENCE_" + env_key(language)) ?? "")
+  if path == "" then NONE
+  else match fs.read_text(path) {
+    ok(t) => if string.trim(t) == "" then NONE else clip(t, path),
+    err(_) => NONE,
+  }
+}
+
+effect fn in_project(root: String) -> Reference = {
+  var found = NONE
+  for rel in IN_PROJECT {
+    if found.label == "" then {
+      match fs.read_text(root + "/" + rel) {
+        ok(t) => if string.trim(t) != "" then found = clip(t, rel) else (),
+        err(_) => (),
+      }
+    } else ()
+  }
+  found
+}
+
+effect fn from_toolchain(root: String, language: String) -> Reference = {
+  var found = NONE
+  for entry in TOOLCHAIN {
+    let (lang, bin, commands) = entry
+    if found.label == "" and lang == language and on_path(bin)! then {
+      for cmd in commands {
+        if found.label == "" then {
+          let r = observe.run(cmd, root, 15000)!
+          if r.code == 0 and string.trim(r.stdout) != "" then found = clip(r.stdout, cmd) else ()
+        } else ()
+      }
+    } else ()
+  }
+  found
+}
+
+// Which reference this project gets, in tier order; none is said, not assumed.
+effect fn reference_for(root: String, language: String) -> Reference = {
+  if language == "" or language == "unknown" then NONE
+  else if is_off(env.get("CAIRN_REFERENCE_" + env_key(language)) ?? "") then NONE
+  else {
+    let c = configured(language)!
+    if c.label != "" then c
+    else {
+      let p = in_project(root)!
+      if p.label != "" then p else from_toolchain(root, language)!
+    }
+  }
+}
+
+// How the reference is shown to the model.
+fn render(r: Reference) -> String =
+  if r.label == "" then ""
+  else "=== LANGUAGE REFERENCE (" + r.label + ") ===\n"
+    + "The reference for this project's language. Prefer what is written here to syntax remembered from another language.\n\n"
+    + r.text
+
+test "no reference renders as nothing" { assert_eq(render(NONE), "") }
+test "a rendered reference names its source" { assert_eq(string.contains(render(Reference { label: "CHEATSHEET.md", text: "x" }), "CHEATSHEET.md"), true) }
+test "off is a request for no reference, not a path" { assert_eq(is_off(" OFF "), true); assert_eq(is_off("none"), true); assert_eq(is_off("/tmp/x.md"), false) }
+test "env keys survive c++" { assert_eq(env_key("c++"), "C__") }
+test "env keys pass letters through" { assert_eq(env_key("almide"), "ALMIDE") }
+test "a short reference is kept whole" { assert_eq(clip("abc", "l").text, "abc") }
+test "a long reference is clipped to the budget" { assert_eq(string.len(clip(string.repeat("x", MAX_CHARS + 10), "l").text), MAX_CHARS) }
+test "a clipped reference says it was clipped" { assert_eq(string.contains(clip(string.repeat("x", MAX_CHARS + 10), "l").label, "first"), true) }

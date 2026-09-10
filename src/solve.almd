@@ -12,6 +12,7 @@ import base64
 import bytes
 import self.llm
 import self.ask
+import self.reference
 import self.observe
 import self.explain
 import self.gate
@@ -20,8 +21,11 @@ type Edit = { path: String, source: String }
 type Rejected = { path: String, why: String }
 type Attempt = { n: Int, read: List[String], edits: List[Edit], rejected: List[Rejected], apply_error: String,
   verify: observe.CommandResult?, ok: Bool, cost_usd: Float, ms: Int, explanation: String }
-type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String }
-type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool }
+// `polish_kept` is none when no polish ran, and otherwise says whether the
+// simpler version survived its verify. Without it a rolled-back polish
+// reports the same headline as one that was kept.
+type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String, polish_kept: Bool? }
+type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool, polish: Int, polish_only: Bool }
 
 let SELECT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Paths copied exactly from the FILES list. No others.\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"files\",\"reason\"],\"additionalProperties\":false}"
 
@@ -37,13 +41,59 @@ Rules that matter more than anything else:
 - When you emit a file, emit the whole file, exactly as it should appear on disk.
 """
 
+// What is asked once the verify command already passes. It names the shapes
+// the loop actually produces — the reference run reached cyclomatic 22 with a
+// nesting depth of 5 — and it forbids the one thing that would make the
+// simplification worthless.
+let POLISH_QUESTION = """
+The verify command already passes. Do not change what the code does.
+Say the same thing more simply, and only where it is genuinely simpler:
+- fewer branches on the same path, and less nesting inside them
+- a long function split where it already has a seam, not for its own sake
+- a helper that only unwraps a value the language can unwrap directly, removed
+- a loop that recomputes something the standard library already provides, replaced
+Behaviour is fixed. Every test must still pass for the same reason it passes
+now, and every input that works today must still work. If the code is already
+simple, emit no edits and say so.
+"""
+
+// The files as they stand right now, so a polish that breaks the build can be
+// undone. A file that cannot be read is not snapshotted and not restored.
+effect fn snapshot_of(root: String, paths: List[String]) -> List[(String, String)] = {
+  var out: List[(String, String)] = []
+  for p in paths {
+    match fs.read_text(root + "/" + p) {
+      ok(t) => list.push(out, (p, t)),
+      err(_) => (),
+    }
+  }
+  out
+}
+
+effect fn restore(root: String, snapshot: List[(String, String)]) -> Unit = {
+  for entry in snapshot {
+    let (p, text) = entry
+    let _ = fs.write(root + "/" + p, text)
+    ()
+  }
+}
+
 effect fn note(quiet: Bool, text: String) -> Unit = if quiet then () else eprintln("  note: " + text)
+
+// A hedge that never wins is a second request paid for and thrown away; one
+// that usually wins says the first request was not going to finish in time.
+// Neither can be told from the outside, so both are said out loud.
+effect fn note_hedges(quiet: Bool, hedged: Int, wins: Int) -> Unit =
+  if hedged > 0 then note(quiet, "hedged " + int.to_string(hedged) + " slow request(s), "
+    + (if wins == 0 then "and the first answer still won every time — the second was paid for and discarded"
+       else "the hedge answered first " + int.to_string(wins) + " of them"))!
+  else ()
 effect fn phase(quiet: Bool, name: String, detail: String) -> Unit = if quiet then () else eprintln("\n[" + name + "]" + (if detail == "" then "" else " " + detail))
 
 fn schema(s: String) -> Value = json.parse(s) ?? value.object([])
 
 // How the observation is shown to the model. Facts, in a fixed order.
-fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: String) -> String = {
+fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: String, language_reference: String) -> String = {
   var parts: List[String] = []
   list.push(parts, "=== TASK ===\n" + task)
   let fp_lang = option.map(obs.fingerprint, (f) => f.language) ?? "unknown"
@@ -54,6 +104,7 @@ fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: 
     + "verify command: " + (if obs.verify_command == "" then "(none)" else obs.verify_command)
     + (if obs.verify_source == "user" then "  [given by the user — this is the command that decides success]"
        else if obs.verify_source == "marker" then "  [inferred from the marker file]" else ""))
+  if language_reference != "" then list.push(parts, language_reference) else ()
   list.push(parts, "=== FILES (" + int.to_string(list.len(obs.files)) + ") ===\n" + string.join(obs.files, "\n") + (if obs.files_omitted != "" then "\n" + obs.files_omitted else ""))
   if string.trim(obs.repo_map) != "" then list.push(parts, "=== REPO MAP (ranked by how central each symbol is) ===\n" + obs.repo_map) else ()
   match obs.baseline {
@@ -127,6 +178,7 @@ effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Obs
     match ask.ask_json(creds, prompt, schema(SELECT_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: 2048, reasoning_effort: "low" }) {
       ok(a) => {
         cost = a.cost_usd
+        note_hedges(quiet, a.hedged, a.hedge_wins)!
         picked = list.map(json.get_array(a.value, "files") ?? [], (v) => value.as_string(v) ?? "")
       },
       err(e) => note(quiet, "file selection failed: " + e)!,
@@ -172,7 +224,12 @@ effect fn render_files(root: String, paths: List[String], quiet: Bool) -> (Strin
         let o = observe.run("hew outline " + observe.shell_quote(p), root, 20000)!
         if o.code == 0 and string.trim(o.stdout) != "" then outline = "--- " + p + ": outline (hew) ---\n" + string.trim_end(o.stdout) + "\n\n" else ()
       } else ()
-      list.push(chunks, outline + "--- " + p + (if r.truncated then " (TRUNCATED, READ-ONLY — incomplete source; do not emit a replacement)" else "") + " ---\n" + r.content)
+      // The size goes in the header because 3 of 25 measured attempts were
+      // spent re-asking for a whole file after the model emitted only the part
+      // it changed. A number it can count against is cheaper than a rejection.
+      let size = if r.truncated then " (TRUNCATED, READ-ONLY — incomplete source; do not emit a replacement)"
+        else " (" + int.to_string(list.len(string.split(r.content, "\n"))) + " lines, " + int.to_string(string.len(r.content)) + " bytes — a replacement must be all of it)"
+      list.push(chunks, outline + "--- " + p + size + " ---\n" + r.content)
     }
   }
   (string.join(chunks, "\n\n"), read)
@@ -359,16 +416,22 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
   let quiet = opts.quiet
   let dirty_before = changed_files(obs.root)!
   let baseline_excerpt = match obs.baseline { some(b) => failure_view(b.command, b.stdout + "\n" + b.stderr, obs.root, 60, quiet)!, none => "" }
-  let context = render_observation(obs, task, baseline_excerpt)
+  let lang = option.map(obs.fingerprint, (f) => f.language) ?? ""
+  let ref = reference.reference_for(obs.root, lang)!
+  if not quiet and ref.label != "" then eprintln("  reference: " + ref.label) else ()
+  if not quiet and ref.label == "" and lang != "" then eprintln("  reference: (none for " + lang + ")") else ()
+  let context = render_observation(obs, task, baseline_excerpt, reference.render(ref))
   var attempts: List[Attempt] = []
   var warnings: List[String] = []
   var total_cost = 0.0
 
   // Nothing to do, and saying so is the whole answer: run against a green
-  // project the loop once replaced a working file with prose.
-  if option.map(obs.baseline, (b) => b.code == 0) ?? false then
+  // project the loop once replaced a working file with prose. `polish_only` is
+  // the one caller that wants a green project: it has nothing to fix and only
+  // wants the code said more simply, so it starts where solve would stop.
+  if (option.map(obs.baseline, (b) => b.code == 0) ?? false) and not opts.polish_only then
     ok(Outcome { ok: true, attempts: [], changed: [], cost_usd: 0.0, wall_ms: env.millis() - started,
-      warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"], harness_broken: "" })
+      warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"], harness_broken: "", polish_kept: none })
   else {
     phase(quiet, "select", "")!
     let (selected, select_cost) = select_files(creds, context, obs, opts.max_files, opts.model, quiet)!
@@ -384,14 +447,20 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
     var last_failure_key = ""
     var n = 1
     var finished = false
-    while not finished and n <= opts.max_attempts {
+    var polishing = opts.polish_only   // the extra attempt that only simplifies
+    var polish_left = if opts.polish_only then 0 else opts.polish
+    var succeeded = opts.polish_only   // a PASS was reached and kept
+    var polish_kept: Bool? = none
+    var snapshot: List[(String, String)] = if opts.polish_only then snapshot_of(obs.root, paths)! else []
+    while not finished and (n <= opts.max_attempts or polishing) {
       let cost_before = total_cost
       let started_at = env.millis()
-      phase(quiet, "edit", "attempt " + int.to_string(n) + "/" + int.to_string(opts.max_attempts))!
+      phase(quiet, "edit", if polishing then "polish" else "attempt " + int.to_string(n) + "/" + int.to_string(opts.max_attempts))!
       let (block, read) = render_files(obs.root, paths, quiet)!
       let prompt = context + "\n\n=== FILE CONTENTS ===\n" + (if block == "" then "(none could be read)" else block)
-        + (if history != "" then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
-        + "\n\n=== QUESTION ===\nFix the problem.\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
+        + (if history != "" and not polishing then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
+        + "\n\n=== QUESTION ===\n" + (if polishing then POLISH_QUESTION else "Fix the problem.")
+        + "\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
         + (if obs.verify_command != "" then "Success is \"" + obs.verify_command + "\" exiting zero for the right reason.\n" else "")
         + "Do not weaken, skip or delete tests to achieve it."
 
@@ -415,7 +484,24 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
         if round == 1 then {
           if not list.is_empty(edits) or list.is_empty(rejected) or apply_error != "" then stop_rounds = true
           else {
-            repair = "\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n" + string.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + "\nAnswer again. For each file, `source` is the complete file as it should exist on disk, every line, with your change applied."
+            // The rejection reasons are raw compiler output. The same
+            // diagnostic codes are explained for a failing verify command, and
+            // an answer rejected by the gate is the place they are needed most:
+            // three measured runs re-asked twice on the same E005 without ever
+            // being told what it meant.
+            let why_text = string.join(list.map(rejected, (x) => x.why), "\n")
+            var gate_explained = ""
+            match explain.explainer_for(option.map(obs.fingerprint, (f) => f.language) ?? "") {
+              some(ex) => {
+                let found = explain.explain(why_text, ex, obs.root)!
+                if not list.is_empty(found) then {
+                  gate_explained = "\n" + explain.render_explanations(found) + "\n"
+                  note(quiet, "explained the rejection: " + string.join(list.map(found, (f) => f.code), ", "))!
+                } else ()
+              },
+              none => (),
+            }
+            repair = "\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n" + string.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + gate_explained + "\nAnswer again. For each file, `source` is the complete file as it should exist on disk, every line, with your change applied."
             note(quiet, "every edit was rejected for its shape; asking once more with the reasons, same effort")!
             rejected = []
           }
@@ -425,6 +511,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
             err(e) => { apply_error = "model: " + e },
             ok(a) => {
               total_cost = total_cost + a.cost_usd
+              note_hedges(quiet, a.hedged, a.hedge_wins)!
               explanation = json.get_string(a.value, "explanation") ?? ""
               for v in json.get_array(a.value, "edits") ?? [] {
                 match edit_of(v) {
@@ -503,7 +590,26 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       last_attempt_ms = env.millis() - started_at
       list.push(attempts, Attempt { n: n, read: read, edits: edits, rejected: rejected, apply_error: apply_error, verify: verify, ok: passed,
         cost_usd: total_cost - cost_before, ms: last_attempt_ms, explanation: explanation })
-      if passed then finished = true else ()
+      // The first PASS is the answer, not the deliverable: the code that gets
+      // there is the code the model reached for under a failing test, and it
+      // shows — deep nesting, one long function, helpers that exist to route
+      // around a diagnostic. One more attempt says the same thing more simply.
+      // The verify command stays the judge. A polish that breaks it is rolled
+      // back and the version that passed is what stays on disk.
+      if passed and not polishing and polish_left > 0 then {
+        succeeded = true
+        polish_left = polish_left - 1
+        polishing = true
+        snapshot = snapshot_of(obs.root, read)!
+        note(quiet, "passed; one attempt to simplify it, rolled back if the verify command stops passing")!
+      } else if polishing then {
+        finished = true
+        polish_kept = some(passed)
+        if not passed then {
+          restore(obs.root, snapshot)!
+          note(quiet, "the simpler version did not pass; rolled back to the version that did")!
+        } else note(quiet, "kept the simpler version")!
+      } else if passed then { succeeded = true; finished = true } else ()
 
       if not finished then {
         let why = if apply_error != "" then apply_error
@@ -550,9 +656,9 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
     }
 
     let changed = list.filter(changed_files(obs.root)!, (f) => not list.contains(dirty_before, f))
-    let solved = option.map(list.last(attempts), (a) => a.ok) ?? false
+    let solved = succeeded or (option.map(list.last(attempts), (a) => a.ok) ?? false)
     if solved then { for w in gaming_warnings(obs, attempts, changed)! { list.push(warnings, w) } } else ()
-    ok(Outcome { ok: solved, attempts: attempts, changed: changed, cost_usd: total_cost, wall_ms: env.millis() - started, warnings: warnings, harness_broken: harness_broken })
+    ok(Outcome { ok: solved, attempts: attempts, changed: changed, cost_usd: total_cost, wall_ms: env.millis() - started, warnings: warnings, harness_broken: harness_broken, polish_kept: polish_kept })
   }
 }
 
@@ -592,4 +698,26 @@ test "expanded reads retain the tail and partial files are not editable" {
   let outside = observe.read_for_model(root, "../outside.rs", 10)!
   assert_eq(outside.error, "outside the project root")
   fs.remove_all(root)!
+}
+
+// The polish pass is only safe if the rollback is: a simplification that stops
+// the verify command must leave the passing files exactly as they were.
+test "a snapshot restores the files it captured, and ignores the ones it could not read" {
+  let root = fs.create_temp_dir("cairn-polish")!
+  fs.write(root + "/kept.almd", "fn passing() -> Int = 1\n")!
+  let snap = snapshot_of(root, ["kept.almd", "never-existed.almd"])!
+  assert_eq(list.len(snap), 1)
+  fs.write(root + "/kept.almd", "fn broken() -> Int = \n")!
+  restore(root, snap)!
+  assert_eq(fs.read_text(root + "/kept.almd") ?? "", "fn passing() -> Int = 1\n")
+}
+
+// The header carries the size because the model has to reproduce it exactly.
+test "an editable file is headed with the size a replacement has to match" {
+  let root = fs.create_temp_dir("cairn-header")!
+  fs.write(root + "/small.rs", "fn a() {}\nfn b() {}\n")!
+  let (context, editable) = render_files(root, ["small.rs"], true)!
+  assert(string.contains(context, "3 lines, 20 bytes"))
+  assert(string.contains(context, "a replacement must be all of it"))
+  assert(list.contains(editable, "small.rs"))
 }

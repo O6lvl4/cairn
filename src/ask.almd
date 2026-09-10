@@ -104,7 +104,9 @@ fn parse_json(raw: String) -> Result[Value, String] = {
 effect fn debug(label: String, body: String) -> Unit =
   if (env.get("CAIRN_DEBUG") ?? env.get("MENDIDE_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---") else ()
 
-type Asked = { value: Value, cost_usd: Float }
+// `hedged`/`hedge_wins` count transport hedges across every retry this ask
+// made, so the caller can say what the second requests actually bought.
+type Asked = { value: Value, cost_usd: Float, hedged: Int, hedge_wins: Int }
 
 // what one call produced: an answer, a reason to retry, or a reason to stop
 type Step = | Got(String) | Retry(String)
@@ -127,6 +129,8 @@ effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Opt
   var attempt = 0
   var rate_limited = 0
   var cost = 0.0
+  var hedged = 0
+  var hedge_wins = 0
   // (an Option holding a Result trips the native auto-propagation; the
   // outcome is kept as two plain vars instead)
   var finished = false
@@ -141,6 +145,8 @@ effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Opt
     match res {
       ok(r) => {
         cost = cost + r.cost_usd
+        if r.hedged then hedged = hedged + 1 else ()
+        if r.won_by_hedge then hedge_wins = hedge_wins + 1 else ()
         if looks_truncated(r.text) and budget < 65536 then {
           budget = int.min(65536, budget * 3)
           outcome = Retry("response truncated before any content could be parsed (" + int.to_string(string.len(r.text)) + " chars) [retrying at " + int.to_string(budget) + " output tokens; raise max_completion_tokens]")
@@ -197,7 +203,7 @@ effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Opt
     }
   }
   match answer {
-    some(v) => ok(Asked { value: v, cost_usd: cost }),
+    some(v) => ok(Asked { value: v, cost_usd: cost, hedged: hedged, hedge_wins: hedge_wins }),
     none => err(if failure == "" then "no answer" else failure),
   }
 }

@@ -42,6 +42,14 @@ Choose `--verify` for your project: its exit status decides success. Use
 `./cairn help` for options, or `./cairn llm-test` to check credentials with one model
 call.
 
+`cairn polish` asks for the same behaviour written more simply, on a project
+whose verification command already passes. A polish that stops it passing is
+rolled back to the version that did.
+
+```sh
+./cairn polish --root ../project --verify "cargo test"
+```
+
 ## From observation to a verified edit
 
 1. **Observe.** Inspect the project, list its files, build a repository map when
@@ -67,6 +75,37 @@ model.
 
 Install companions separately and put them on `PATH`. cairn uses them when
 available, with built-in fallbacks when they are absent.
+
+## The language reference
+
+A model writing in a language it has never seen guesses, and the guesses are the
+expensive part: on this project's own measurements every failed attempt was a
+compile error, never a wrong answer. So cairn shows it a reference, found in
+this order and named in the output:
+
+| Tier | Where |
+|---|---|
+| 1 | `CAIRN_REFERENCE_<LANGUAGE>=/path/to/notes.md` (`=off` asks for none) |
+| 2 | a reference the project carries — `CHEATSHEET.md`, `docs/CHEATSHEET.md` |
+| 3 | one the toolchain prints — `almide ide stdlib-snapshot` for Almide |
+
+Tier 3 needs no configuration. A language with no reference gets none, and the
+run says so rather than pretending otherwise. References longer than 48 KB are
+clipped, and the label says they were.
+
+## Slow requests
+
+One request may be hedged: if the first has not answered within
+`CAIRN_HEDGE_MS` (default 75000), a second identical one is started and the
+first answer to arrive is used. The run reports how many were hedged and how
+many the hedge actually won, because a hedge that never wins is a second
+request paid for and discarded.
+
+`CAIRN_CALL_MAX_MS` (default 360000) is the wall-clock cap on one request. It
+exists because the idle deadline cannot catch the failure that costs the most:
+a model that keeps talking is never idle. One observed call streamed 1.7 MB
+over twelve minutes before it was stopped by hand. Past the cap the request is
+abandoned and the next attempt is asked for less.
 
 ## Syntax checks before writing
 
@@ -111,6 +150,7 @@ CI pins the compiler and Rust versions. See [reproducible checks](ci/README.md).
 | `src/observe.almd` | Project inspection and verification commands |
 | `src/solve.almd` | File selection and the edit/verify loop |
 | `src/gate.almd` | Syntax checks before writes |
+| `src/reference.almd` | The language reference shown to the model |
 | `src/explain.almd` | Compiler diagnostic explanations |
 | `src/ask.almd` | Structured model requests and retries |
 | `src/llm.almd` | Workers AI streaming and cost accounting |

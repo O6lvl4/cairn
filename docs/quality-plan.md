@@ -58,3 +58,58 @@ Files still truncated are context only: the complete-file edit path rejects them
 This does not yet implement model-selected symbol requests or targeted patch edits
 for files larger than that budget. No repair-success or world-ranking claim follows
 from these integration tests; paid model evaluations were not run.
+
+## Language reference, and three things that did not work (2026-09-10)
+
+One task, repeated: a JSON path picker implemented against 30 pre-written tests
+in a language the model has not seen, `almide test` as the verify command,
+`cf:glm-5.3-flash`, six attempts. Every number below is from that one task, so
+none of it is a repair-success rate. The variance is reported because it is
+larger than most of the effects.
+
+**The reference works.** Without one, the run spent six attempts and produced
+six hand-rolled functions that unwrap a `Result` by hand, plus a loop counting
+a list the standard library already measures. With the toolchain's own
+`almide ide stdlib-snapshot` — 14 KB of signatures, no syntax, no
+configuration — the same task solved in two attempts for $0.012206 and none of
+those helpers appeared. Repeated three more times: 3/3 solved, zero hand-rolled
+unwrappers in all three. Every observed failure across every run was a compile
+error; not one was a wrong answer. The gap the reference closes is knowing what
+the API returns, not knowing how the language is written.
+
+**Run-to-run variance is the headline.** Three runs of one identical
+configuration: 2, 3 and 4 attempts; 139 s, 174 s and 456 s; $0.0093, $0.0096
+and $0.0224; cyclomatic 18, 40 and 18. A single run cannot separate a change
+from noise here, and three earlier single-run comparisons in this project were
+noise.
+
+**Polish did not work: three attempts, three failures.** Asking, once the verify
+command already passes, for the same behaviour written more simply produced a
+two-byte diff on the first run and a version that failed the tests on the second
+and third. The rollback is sound — the tree came back byte-identical each time —
+so the pass ships behind `--polish` at a default of 0, and as `cairn polish` for
+a project that is already green. The command exists mostly so the pass can be
+measured at all; before it, polish could only happen inside a repair.
+
+**Asking for structure up front did not work either, and was worse.** Adding
+"a type that names the cases, over flags and re-scanning a string" and two
+similar lines to the edit question moved the model to sum types and recursive
+descent — the shape a stronger model reaches for unprompted. It could not then
+keep `Option[T]` and `T` apart. Five runs under that instruction had written
+nothing by their second attempt, while three control runs had already finished;
+their requests were streaming 500-760 KB each, generating without converging on
+an answer of about 5 KB. The instruction was removed. Explaining the rejected
+diagnostic on the re-ask, added while testing this, did not rescue it and was
+kept for its own sake.
+
+Taken together: the harness closes gaps in what the model knows, and does not
+close gaps in what it can do. Structural quality — cyclomatic 18-40 against 6
+for a stronger model on the same task — did not move under either intervention.
+
+**Instrumentation earned more than the features.** Hedged requests looked
+plausible until they reported themselves: three hedges fired, three lost, so the
+second request was paid for and discarded every time. A rolled-back polish
+reported `SOLVED` until the outcome was carried out of the loop. Twenty-eight
+per cent of attempts were spending a whole model call on a rejected edit, which
+was only visible by counting across saved logs. None of these were features; all
+three changed a decision.

@@ -12,10 +12,9 @@
 
 import json
 import env
-import regex
 import fs
+import process
 import self.observe
-import datetime
 
 type Price = { input: Float, output: Float, cached: Float }        // USD per Mtok
 type ModelInfo = { short: String, cf_id: String, price: Price }
@@ -61,7 +60,11 @@ effect fn credentials_from_env() -> Credentials? = {
 }
 
 type Request = { prompt: String, system: String, model: String, max_output_tokens: Int, reasoning_effort: String, schema: Value? }
-type Response = { text: String, cost_usd: Float, input_tokens: Int, output_tokens: Int, duration_ms: Int }
+// `hedged` says a second, identical request was started because the first was
+// slow; `won_by_hedge` says that second one is the answer being returned. Both
+// are here because a hedge that never wins is pure waste, and that cannot be
+// told from the outside.
+type Response = { text: String, cost_usd: Float, input_tokens: Int, output_tokens: Int, duration_ms: Int, hedged: Bool, won_by_hedge: Bool }
 
 fn build_body(req: Request) -> String = {
   var messages: List[Value] = []
@@ -172,7 +175,7 @@ fn parse_completion(body: String) -> Result[Completion, String] = {
 }
 
 // Turn a completion into the response the loop uses, or the error it must see.
-fn settle(c: Completion, model: String, duration_ms: Int) -> Result[Response, String] = {
+fn settle(c: Completion, model: String, duration_ms: Int, hedged: Bool, won_by_hedge: Bool) -> Result[Response, String] = {
   if c.finish == "length" and string.trim(c.content) == "" then {
     let reasoned = if string.trim(c.reasoning) != "" then ", budget consumed by reasoning" else ""
     err("truncated before any content (finish_reason=length" + reasoned + "); raise max_completion_tokens")
@@ -189,7 +192,7 @@ fn settle(c: Completion, model: String, duration_ms: Int) -> Result[Response, St
         some(p) => (float.from_int(input_tokens) * p.input + float.from_int(cached) * p.cached + float.from_int(completion_tokens) * p.output) / 1000000.0,
         none => 0.0,
       }
-    ok(Response { text: c.content, cost_usd: cost, input_tokens: input_tokens, output_tokens: completion_tokens, duration_ms: duration_ms })
+    ok(Response { text: c.content, cost_usd: cost, input_tokens: input_tokens, output_tokens: completion_tokens, duration_ms: duration_ms, hedged: hedged, won_by_hedge: won_by_hedge })
   }
 }
 
@@ -249,26 +252,144 @@ fn transport_error(code: Int, said: String) -> String =
 fn fold_body(text: String) -> Result[Completion, String] =
   if string.starts_with(string.trim_start(text), "data:") then assemble_stream(text) else parse_completion(text)
 
-// One call: request to a file, stream to a file, both removed afterwards.
-effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
-  let t0 = env.millis()
-  let body_path = fs.create_temp_file("cairn-req") |> result.map_err((e) => "temp file: " + e)!
+// How long one call may run before a second, identical one is started beside
+// it. Measured on this project: comparable calls to the same model returned in
+// 68s and in 244s, so the tail — not the median — is what sets wall time. The
+// hedge costs a second request only on the tail, and the first answer to
+// arrive wins. `CAIRN_HEDGE_MS=0` turns it off.
+effect fn hedge_after_ms() -> Int = int.parse(string.trim(env.get("CAIRN_HEDGE_MS") ?? "")) ?? 75000
+
+// The wall-clock cap on one request, hedge included. The idle deadline cannot
+// catch the failure that costs the most: a model that keeps talking is never
+// idle, so `speed-time` never fires and `max-time` is the only stop — half an
+// hour. One observed call streamed 1.7 MB at 3 KB/s for twelve minutes before
+// it was killed by hand. Past this cap the request is abandoned and the loop
+// treats it as an attempt that produced nothing; `budget_after` then halves
+// the output budget and lowers the effort, which is the right response to a
+// generation that would not stop. `CAIRN_CALL_MAX_MS=0` restores max-time as
+// the only limit.
+// `0` means "no cap of ours", which is curl's max-time alone; anything else
+// narrows it and can never widen it past that hard stop.
+fn effective_deadline(cap: Int, hard: Int) -> Int = if cap > 0 then int.min(cap, hard) else hard
+
+effect fn call_max_ms() -> Int = int.parse(string.trim(env.get("CAIRN_CALL_MAX_MS") ?? "")) ?? 360000
+
+let POLL_MS = 250
+
+// One curl, detached. Its stream, its status line and its errors all go to
+// files: a spawned child holding the pipes makes the deadline unenforceable.
+type Call = { pid: Int, sse: String, cfg: String, out: String, err: String, pid_file: String }
+
+// curl's stdout is `%{http_code}` with no newline; the shell appends the exit
+// status on its own line once curl has actually finished. Nothing else writes
+// here, so the presence of that second line is what "done" means — a zombie
+// child would still look alive to `is_alive`.
+fn call_result(out: String) -> (Int, Int)? = {
+  let lines = string.split(out, "\n")
+  if list.len(lines) < 2 then none
+  else match int.parse(string.trim(list.get(lines, 1) ?? "")) {
+    ok(code) => some((int.parse(string.trim(list.get(lines, 0) ?? "")) ?? 0, code)),
+    err(_) => none,
+  }
+}
+
+effect fn start_call(creds: Credentials, body_path: String) -> Result[Call, String] = {
   let sse_path = fs.create_temp_file("cairn-sse") |> result.map_err((e) => "temp file: " + e)!
   let cfg_path = fs.create_temp_file("cairn-cfg") |> result.map_err((e) => "temp file: " + e)!
-  fs.write(body_path, build_body(req)) |> result.map_err((e) => "write request: " + e)!
+  let out_path = fs.create_temp_file("cairn-out") |> result.map_err((e) => "temp file: " + e)!
+  let err_path = fs.create_temp_file("cairn-err") |> result.map_err((e) => "temp file: " + e)!
   fs.write(cfg_path, curl_config(creds, body_path, sse_path)) |> result.map_err((e) => "write config: " + e)!
-  let r = observe.run("curl --config " + observe.shell_quote(cfg_path), ".", (TOTAL_TIMEOUT_S + 30) * 1000)!
-  let sse = fs.read_text(sse_path) ?? ""
-  let _ = fs.remove(body_path)
-  let _ = fs.remove(cfg_path)
-  let _ = fs.remove(sse_path)
-  let status = int.parse(string.trim(r.stdout)) ?? 0
-  if r.code != 0 then err(transport_error(r.code, string.trim(r.stderr)))
+  let pid_path = fs.create_temp_file("cairn-pid") |> result.map_err((e) => "temp file: " + e)!
+  // curl runs in the background so its own pid can be recorded: killing the
+  // shell alone would leave the request running as an orphan, still streaming
+  // and still billed. `wait` makes $? curl's exit status, not the shell's.
+  let script = "curl --config " + observe.shell_quote(cfg_path)
+    + " > " + observe.shell_quote(out_path) + " 2> " + observe.shell_quote(err_path)
+    + " & c=$!; echo $c > " + observe.shell_quote(pid_path) + "; wait $c"
+    + "; printf '\\n%s\\n' \"$?\" >> " + observe.shell_quote(out_path)
+  let pid = process.spawn("sh", ["-c", script]) |> result.map_err((e) => "spawn: " + e)!
+  ok(Call { pid: pid, sse: sse_path, cfg: cfg_path, out: out_path, err: err_path, pid_file: pid_path })
+}
+
+effect fn discard(c: Call) -> Unit = {
+  // The curl first, then the shell waiting on it.
+  match int.parse(string.trim(fs.read_text(c.pid_file) ?? "")) {
+    ok(curl_pid) => if process.is_alive(curl_pid) then { let _ = process.kill(curl_pid, 15); () } else (),
+    err(_) => (),
+  }
+  if process.is_alive(c.pid) then { let _ = process.kill(c.pid, 15); () } else ()
+  let _ = fs.remove(c.pid_file)
+  let _ = fs.remove(c.sse)
+  let _ = fs.remove(c.cfg)
+  let _ = fs.remove(c.out)
+  let _ = fs.remove(c.err)
+  ()
+}
+
+// Whatever the winning call produced, read once it has stopped writing.
+effect fn reap(c: Call, req: Request, t0: Int, hedged: Bool, won_by_hedge: Bool) -> Result[Response, String] = {
+  let (status, code) = call_result(fs.read_text(c.out) ?? "") ?? (0, 0)
+  let sse = fs.read_text(c.sse) ?? ""
+  let said = string.trim(fs.read_text(c.err) ?? "")
+  discard(c)!
+  if code != 0 then err(transport_error(code, said))
   else if status < 200 or status >= 300 then err("status " + int.to_string(status) + ": " + string.take(string.trim(sse), 500))
   else match fold_body(sse) {
     err(e) => err(e),
-    ok(c) => settle(c, req.model, env.millis() - t0),
+    ok(comp) => settle(comp, req.model, env.millis() - t0, hedged, won_by_hedge),
   }
+}
+
+effect fn is_done(c: Call) -> Bool = option.is_some(call_result(fs.read_text(c.out) ?? ""))
+
+// One request, hedged: the same body sent a second time if the first is slow,
+// and the first answer to land is the one used.
+effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
+  let t0 = env.millis()
+  let body_path = fs.create_temp_file("cairn-req") |> result.map_err((e) => "temp file: " + e)!
+  fs.write(body_path, build_body(req)) |> result.map_err((e) => "write request: " + e)!
+  let cap = call_max_ms()!
+  let hard = (TOTAL_TIMEOUT_S + 30) * 1000
+  let deadline = effective_deadline(cap, hard)
+  let hedge_at = hedge_after_ms()!
+  let first = start_call(creds, body_path)!
+  var second: Call? = none
+  var winner: Call? = none
+  var timed_out = false
+  while option.is_none(winner) and not timed_out {
+    let waited = env.millis() - t0
+    if is_done(first)! then winner = some(first)
+    else match second {
+      some(s) => if is_done(s)! then winner = some(s) else (),
+      none => if hedge_at > 0 and waited > hedge_at then second = some(start_call(creds, body_path)!) else (),
+    }
+    if option.is_none(winner) then {
+      if waited > deadline then timed_out = true else env.sleep_ms(POLL_MS)
+    } else ()
+  }
+  let _ = fs.remove(body_path)
+  match winner {
+    none => {
+      discard(first)!
+      match second { some(s) => discard(s)!, none => () }
+      err("request timeout: no complete answer within " + int.to_string(deadline / 1000) + "s"
+        + (if cap > 0 and cap <= hard then " (CAIRN_CALL_MAX_MS); the model was still generating" else ""))
+    },
+    some(w) => {
+      let hedged = option.is_some(second)
+      let won_by_hedge = w.pid != first.pid
+      let loser = if won_by_hedge then some(first) else second
+      match loser { some(l) => discard(l)!, none => () }
+      reap(w, req, t0, hedged, won_by_hedge)!
+    },
+  }
+}
+
+test "a call is done only once the shell has written the exit status" {
+  assert_eq(call_result("200"), none)
+  assert_eq(call_result("200\n0\n"), some((200, 0)))
+  assert_eq(call_result("000\n28\n"), some((0, 28)))
+  assert_eq(call_result(""), none)
 }
 
 test "assemble_stream folds deltas and keeps the fullest usage" {
@@ -277,7 +398,7 @@ test "assemble_stream folds deltas and keeps the fullest usage" {
   assert_eq(c.content, "Hello")
   assert_eq(c.reasoning, "hm")
   assert_eq(c.finish, "stop")
-  let r = settle(c, "cf:glm-5.3-flash", 5)!
+  let r = settle(c, "cf:glm-5.3-flash", 5, false, false)!
   assert_eq(r.output_tokens, 2)
   assert_eq(r.input_tokens, 10)
   assert(float.abs(r.cost_usd - 50.0 * NEURON_USD) < 0.0000001)
@@ -285,7 +406,7 @@ test "assemble_stream folds deltas and keeps the fullest usage" {
 
 test "a length finish with no content is an error naming the remedy" {
   let c = Completion { content: "", reasoning: "thinking", finish: "length", usage: none }
-  match settle(c, "cf:glm-5.3-flash", 1) {
+  match settle(c, "cf:glm-5.3-flash", 1, false, false) {
     ok(_) => assert(false),
     err(e) => assert(string.contains(e, "raise max_completion_tokens")),
   }
@@ -298,4 +419,41 @@ test "model ids and the request body" {
   let body = build_body(Request { prompt: "hi", system: "sys", model: "cf:glm-5.3-flash", max_output_tokens: 10, reasoning_effort: "low", schema: none })
   assert(string.contains(body, "\"stream\":true"))
   assert(string.contains(body, "\"role\":\"system\""))
+}
+
+// The kill path is the one that leaks money: a losing hedge whose curl outlives
+// the shell keeps streaming a response nobody will read, and keeps being billed
+// for it. The property that matters is not which pid dies but that the work
+// stops, so the child here keeps writing and the test watches the writing stop.
+test "discarding a call stops the work it spawned, not only its shell" {
+  let sink = fs.create_temp_file("cairn-test-sink")!
+  let pid_file = fs.create_temp_file("cairn-test-pid")!
+  let script = "( while true; do echo x >> " + observe.shell_quote(sink) + "; sleep 0.05; done ) & c=$!; echo $c > "
+    + observe.shell_quote(pid_file) + "; wait $c"
+  let shell_pid = process.spawn("sh", ["-c", script])!
+  env.sleep_ms(400)
+  let while_running = string.len(fs.read_text(sink) ?? "")
+  assert(while_running > 0)
+
+  // `sink` is deliberately not one of the paths discard removes: the child
+  // recreates it on the next append, which would hide the very thing measured.
+  let scratch = fs.create_temp_file("cairn-test-scratch")!
+  discard(Call { pid: shell_pid, sse: scratch, cfg: scratch, out: scratch, err: scratch, pid_file: pid_file })!
+  env.sleep_ms(400)
+  let just_after = string.len(fs.read_text(sink) ?? "")
+  env.sleep_ms(400)
+  let later = string.len(fs.read_text(sink) ?? "")
+  assert_eq(later, just_after)
+
+  // And the reason `is_done` reads a file instead of asking `is_alive`: the
+  // shell has been signalled and has stopped doing anything, yet it is still
+  // reported alive until something reaps it. A completion check built on this
+  // would wait forever on a request that already ended.
+  assert(process.is_alive(shell_pid))
+}
+
+test "the wall-clock cap narrows the deadline and never widens it" {
+  assert_eq(effective_deadline(360000, 1830000), 360000)
+  assert_eq(effective_deadline(0, 1830000), 1830000)
+  assert_eq(effective_deadline(9000000, 1830000), 1830000)
 }
