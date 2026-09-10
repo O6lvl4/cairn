@@ -12,6 +12,7 @@
 // (`node --check` refuses a `.tmp`), is checked there, and is renamed into
 // place only if it passes. A refused write leaves the original untouched.
 
+import json
 import fs
 import env
 import process
@@ -52,13 +53,8 @@ let BUILTIN = [
 // with prose, and passes anything a compiler would parse.
 let BALANCE_EXTS = ["java", "cpp", "cc", "cxx", "hpp", "hh", "h", "c", "cs", "kt", "scala", "swift", "ts", "tsx", "m", "mm"]
 
-// What gramide has a grammar for. It is preferred over the language's own tool
-// for these because a gate must never refuse correct code, and gramide answers
-// about syntax alone: it holds no opinion on which edition reserves which word,
-// or on whether an import resolves. Measured against `rustfmt --edition 2024`
-// on 827 files of real Rust, the two agree on all but one, which gramide
-// accepts and rustfmt refuses for using `gen` as a name.
-let GRAMIDE_EXTS = ["almd", "go", "rs"]
+// Compatibility only for older binaries without the languages command.
+let LEGACY_GRAMIDE_EXTS = ["almd", "go", "rs"]
 
 let NONE = Checker { label: "", program: "", args: [] }
 
@@ -81,6 +77,24 @@ effect fn configured(ext: String) -> Checker? = {
   }
 }
 
+fn manifest_supports(raw: String, path: String) -> Bool = match json.parse(raw) {
+  err(_) => false,
+  ok(j) => (json.get_int(j, "schema_version") ?? 0) == 1 and
+    list.any(json.get_array(j, "packages") ?? [], (p) => {
+      let caps = list.filter_map(json.get_array(p, "capabilities") ?? [], (v) => match value.as_string(v) { ok(s) => some(s), err(_) => none })
+      let exts = list.filter_map(json.get_array(p, "extensions") ?? [], (v) => match value.as_string(v) { ok(s) => some(s), err(_) => none })
+      list.contains(caps, "check") and list.any(exts, (ext) => string.starts_with(ext, ".") and string.len(ext) > 1 and string.ends_with(path, ext))
+    }),
+}
+
+effect fn gramide_supports(path: String, ext: String) -> Bool = {
+  match process.exec_status_timeout("gramide", ["languages"], 3000) {
+    err(_) => false,
+    ok(st) => if st.code == 0 then manifest_supports(st.stdout, path)
+      else string.contains(st.stderr, "usage: gramide") and list.contains(LEGACY_GRAMIDE_EXTS, ext),
+  }
+}
+
 // Which check this path gets, in tier order; none is said, not assumed.
 effect fn checker_for(path: String) -> Checker = {
   let ext = observe.extension_of(path)
@@ -88,7 +102,7 @@ effect fn checker_for(path: String) -> Checker = {
   else match configured(ext)! {
     some(c) => c,
     none =>
-      if list.contains(GRAMIDE_EXTS, ext) and on_path("gramide")! then Checker { label: "gramide", program: "gramide", args: ["check", "{}"] }
+      if gramide_supports(path, ext)! then Checker { label: "gramide", program: "gramide", args: ["check", "{}"] }
       else match list.find(BUILTIN, (b) => b.0 == ext) {
         some((_, label, program, args)) => Checker { label: label, program: program, args: args },
         none => if list.contains(BALANCE_EXTS, ext) and on_path("gramide")! then Checker { label: "balance", program: "gramide", args: ["balance", "{}"] } else NONE,
@@ -177,14 +191,14 @@ test "the gate covers the languages it claims to" {
 test "the tiers do not overlap, and gramide is the first of them" {
   // A grammar beats a language tool, which beats brackets. `rs` is in two
   // tables on purpose: gramide gates it, rustfmt only explains a refusal.
-  assert(list.contains(GRAMIDE_EXTS, "rs"))
-  assert(list.contains(GRAMIDE_EXTS, "go"))
-  assert(list.contains(GRAMIDE_EXTS, "almd"))
-  assert(not list.any(GRAMIDE_EXTS, (e) => list.contains(BALANCE_EXTS, e)))
+  assert(list.contains(LEGACY_GRAMIDE_EXTS, "rs"))
+  assert(list.contains(LEGACY_GRAMIDE_EXTS, "go"))
+  assert(list.contains(LEGACY_GRAMIDE_EXTS, "almd"))
+  assert(not list.any(LEGACY_GRAMIDE_EXTS, (e) => list.contains(BALANCE_EXTS, e)))
   // rustfmt is still in BUILTIN so a machine without gramide is not ungated
   assert(list.any(BUILTIN, (b) => b.0 == "rs"))
   // every second opinion is on a language gramide gates, or it never runs
-  assert(list.all(SECOND_OPINION, (s) => list.contains(GRAMIDE_EXTS, s.0)))
+  assert(list.all(SECOND_OPINION, (s) => list.contains(LEGACY_GRAMIDE_EXTS, s.0)))
   // the edition that refused correct Rust 2024, never again
   assert(list.all(BUILTIN, (b) => not list.contains(b.3, "2021")))
 }
@@ -192,4 +206,13 @@ test "the tiers do not overlap, and gramide is the first of them" {
 test "configured checker parsing adds the placeholder" {
   assert_eq(observe.extension_of("a/b.Py"), "py")
   assert_eq(observe.extension_of("Makefile"), "")
+}
+
+test "package capabilities discover new write gates without language branches" {
+  let raw = "{\"schema_version\":1,\"packages\":[{\"id\":\"future\",\"extensions\":[\".future\"],\"capabilities\":[\"check\",\"symbols\"]}]}"
+  assert(manifest_supports(raw, "src/main.future"))
+  assert(not manifest_supports(raw, "src/main.py"))
+  assert(not manifest_supports(string.replace(raw, "\"check\",", ""), "src/main.future"))
+  assert(not manifest_supports(string.replace(raw, "\"schema_version\":1", "\"schema_version\":2"), "src/main.future"))
+  assert(not manifest_supports("{}", "src/main.future"))
 }

@@ -121,3 +121,7 @@ CI pins the compiler and Rust versions. See [reproducible checks](ci/README.md).
 
 Reads expand from 24,000 to at most 96,000 Unicode characters when needed. Files
 still truncated remain read-only context; cairn will not replace them wholesale.
+
+Cairn discovers grammar-backed checks from `gramide languages` packages with the
+`check` capability. Reader-only packages do not qualify as syntax gates. Explicit
+project overrides retain precedence; existing fallback checkers remain available.
