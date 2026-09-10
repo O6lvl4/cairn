@@ -11,7 +11,7 @@ python3 ci/smoke.py
 # taken out, and it is only ever allowed to go down. Raising it needs a reason
 # written next to it.
 if command -v codopsy-almd >/dev/null; then
-  codopsy-almd --max 45 src/
+  codopsy-almd --quiet --max 45 src/
 else
   echo "codopsy-almd not on PATH: structural check skipped (almide install github.com/O6lvl4/codopsy-almd)"
 fi
