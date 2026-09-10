@@ -1,111 +1,120 @@
-# cairn
+<p align="center">
+  <img src="docs/images/cairn.png" alt="Cairn, a black stone guardian with warm golden light between its rocks" width="400">
+</p>
 
-A coding agent written in [Almide](https://github.com/almide/almide): one static
-binary, no runtime to install, and every part of it — the parser it gates writes
-with, the reader it shows files through, the summariser it compresses failures with
-— is a program in the same language.
+<h1 align="center">cairn</h1>
+<p align="center"><strong>Observe first. Build with evidence.</strong></p>
+<p align="center">A coding agent written in Almide.<br>Read the project. Make the edit. Run the tests.</p>
+<p align="center">
+  <a href="https://github.com/O6lvl4/cairn/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/cairn/actions/workflows/quality.yml/badge.svg" alt="Quality CI"></a>
+  · <a href="README_ja.md">日本語</a>
+  · <a href="#quick-start">Quick start</a>
+  · <a href="docs/quality-plan.md">Quality plan</a>
+</p>
 
+cairn works from the evidence in your repository: source files, project markers,
+compiler diagnostics and test results. It selects relevant files, proposes edits,
+checks their syntax with available tools, and runs your verification command again.
+
+Built with [Almide](https://github.com/almide/almide), cairn runs as a single native
+binary. Optional companion tools add syntax trees, structured reads and compact
+failure summaries.
+
+## Quick start
+
+With Almide installed, build from this repository:
+
+```sh
+almide build
+./cairn observe --root ../project
 ```
-cairn solve "the clamp test fails for out-of-range values" --root ../project
-cairn observe --root ../project     what it can establish without asking a model
-cairn llm-test                      one call, to prove the credentials work
+
+`observe` inspects the project and runs its verification command without asking a
+model. To make edits, set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your
+environment or the target project's `.env`, then give cairn a task:
+
+```sh
+./cairn solve "fix clamp for out-of-range values" \
+  --root ../project --verify "cargo test" --attempts 6
 ```
 
-## What it does
+Choose `--verify` for your project: its exit status decides success. Use
+`./cairn help` for options, or `./cairn llm-test` to check credentials with one model
+call.
 
-It observes first, then acts. Nothing is decided until the thing it depends on has
-been looked at, and the model is asked one small question at a time:
+## From observation to a verified edit
 
-1. **Observe** — marker file, language, the command whose exit status defines
-   success, the file list, a ranked repository map, and the failing test's real
-   output. All of it looked up, none of it guessed.
-2. **Select** — which files to read. A project small enough to read whole is read
-   whole, with no model call at all.
-3. **Edit** — the model returns complete files. Each one is written through a syntax
-   gate that refuses anything that does not parse, one file per write, so a good
-   edit lands even when a bad one beside it is refused.
-4. **Verify** — run the command again. A failing test is information the cheap model
-   gets to use; only *unusable output* buys more reasoning, and then a stronger
-   model.
+1. **Observe.** Inspect the project, list its files, build a repository map when
+   available, and collect the current verification output.
+2. **Read.** Select relevant files. Small projects can be read without a model call
+   for file selection.
+3. **Edit.** Ask for complete files and check each edit with the configured or
+   available syntax checker before writing it.
+4. **Verify.** Run the verification command again. Feed the result, actual diff and
+   rejected edits into the next attempt if more work is needed.
 
-Between attempts it feeds back what it actually changed (a unified diff), what was
-rejected and why, the compiler's own explanation of any diagnostic code it emitted,
-and — when the same failure repeats — an instruction to replace the approach rather
-than adjust it.
+Compiler explanations help make diagnostics actionable. Repeated failures prompt
+a different approach; unusable responses can trigger more reasoning or a stronger
+model.
 
-## Why Almide
+## Small tools, working together
 
-famulus5, the TypeScript agent this is ported from, scored 84–85% on the Aider
-polyglot benchmark with an open-weights model. It needed Node, tree-sitter's native
-grammars for its syntax gate, and a separate install for each. This one is a single
-binary that ships with:
-
-- **[gramide](https://github.com/O6lvl4/gramide)** for the syntax gate and the
-  repository map — an Almide parser, corpus-verified, no native library.
-- **[hew](https://github.com/O6lvl4/hew)** for structure-aware reads, when installed.
-- **[ctxgate](https://github.com/O6lvl4/ctxgate)** for verdict-first failure
-  summaries, when installed.
-
-Each is optional; a missing binary means the built-in path, never an error.
-
-## What the write gate covers
-
-No file lands on disk unless it still parses. In tier order: a checker you configure
-(`CAIRN_CHECK_<EXT>`), then gramide for Almide/Go/Rust, then the language's
-own syntax-only tool, then nothing — and
-"nothing" is reported, never assumed.
-
-| language | checked by |
+| Tool | What it adds to cairn |
 |---|---|
-| Almide, Go | gramide (or `almide check` / `gofmt -e` when it is absent) |
-| Rust | gramide, or `rustfmt --edition 2024 --emit stdout` when it is absent; neither resolves imports |
-| Python, Ruby, JavaScript, PHP, Lua, shell, JSON, TOML | the tool each ships |
-| Java, C++, C, C#, Kotlin, Scala, Swift, TypeScript | `gramide balance` — brackets and literals only. Their compilers need the whole project to tell a syntax error from a missing symbol, and a gate that refuses a correct edit is worse than none; this one cannot refuse valid code, and catches the failure that actually happens (a generation that stopped halfway) |
+| [gramide](https://github.com/O6lvl4/gramide) | Syntax checks for Almide, Go and Rust, plus ranked repository maps |
+| [hew](https://github.com/O6lvl4/hew) | Symbol outlines for navigating large source files |
+| [ctxgate](https://github.com/O6lvl4/ctxgate) | Compact summaries of long verification failures |
 
-## Status
+Install companions separately and put them on `PATH`. cairn uses them when
+available, with built-in fallbacks when they are absent.
 
-Measured once, on the Almide exercise set — 23 problems in a language the model has
-never seen, given the language's cheatsheet and the signatures to implement, six
-attempts each, `cf:glm-5.3-flash` throughout:
+## Syntax checks before writing
 
-| | solved | cost |
-|---|---|---|
-| this agent | **23/23 (100%)** | $0.19 |
-| famulus5, the TypeScript original | 21/23 (91.3%) | $0.16 |
+`CAIRN_CHECK_<EXT>` overrides the checker for an extension. Otherwise, cairn uses:
 
-Thirteen were solved on the first attempt, eight on the second, two on the third.
-
-Read that as parity, not as a win. Twenty-three problems is a small set, and the two
-that separate the runs are well inside the noise the same harness showed elsewhere
-(±4 points across identical code on a 225-problem set). What it does establish is
-that nothing was lost in the port. The comparison that would settle it is Aider's
-polyglot benchmark, 225 problems across six languages, where famulus5 scores 84–85%;
-`bench/exercism.sh` is ported and waiting on a checkout of that corpus.
-
-The seeded-bug check passes too: one attempt, five seconds, two hundredths of a cent.
-
-## Build
-
-```
-almide build          # → ./cairn
-almide test           # 7 modules
-```
-
-Credentials come from the environment or a `.env` beside the project:
-`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`.
-
-## Layout
-
-| file | what it holds |
+| Language | Check |
 |---|---|
-| `src/llm.almd` | the Workers AI call: streamed always, cost from `neurons`, truncation is an error |
-| `src/ask.almd` | schema-constrained questions, and the retry policy (a 408 retries *smaller*) |
-| `src/observe.almd` | markers, file lists, command running, what counts as a broken harness |
-| `src/explain.almd` | `almide explain` / `rustc --explain`, and which part of a failure to show |
-| `src/gate.almd` | the write gate: no file lands unless it parses |
-| `src/solve.almd` | the loop |
-| `src/main.almd` | the CLI |
+| Almide, Go | gramide, falling back to `almide check` / `gofmt -e` |
+| Rust | gramide, falling back to `rustfmt --edition 2024 --emit stdout` |
+| Python, Ruby, JavaScript, PHP, Lua, shell, JSON, TOML | Language-specific tools |
+| Java, C++, C, C#, Kotlin, Scala, Swift, TypeScript | `gramide balance` for delimiters and literals |
+
+Coverage depends on the available checker. Delimiter balance is a limited check,
+and syntax acceptance does not establish that a program is correct. Unavailable
+checks are reported; the project's verification command remains the final test.
+
+## Progress, measured
+
+The repository's historical Almide exercise run reported **23/23 solved for $0.19**,
+using `cf:glm-5.3-flash`, a language cheatsheet and up to six attempts per task.
+This is a small development benchmark, not a general repair-success rate or a
+world ranking. Model training exposure is unknown.
+
+The [quality plan](docs/quality-plan.md) defines the next comparisons: independently
+verified repairs, total cost and time, syntax accuracy, and source-reading
+precision. The [benchmark harness](bench/almide.sh) can be checked without model
+calls using `BENCH_CHECK_ONLY=1`; [the polyglot harness](bench/exercism.sh) provides
+another comparison path.
+
+## Development
+
+```sh
+almide test
+bash ci/check.sh       # tests, build and CLI smoke; no model calls
+```
+
+CI pins the compiler and Rust versions. See [reproducible checks](ci/README.md).
+
+| Source | Responsibility |
+|---|---|
+| `src/main.almd` | Commands, options and credentials |
+| `src/observe.almd` | Project inspection and verification commands |
+| `src/solve.almd` | File selection and the edit/verify loop |
+| `src/gate.almd` | Syntax checks before writes |
+| `src/explain.almd` | Compiler diagnostic explanations |
+| `src/ask.almd` | Structured model requests and retries |
+| `src/llm.almd` | Workers AI streaming and cost accounting |
 
 ## License
 
-MIT or Apache-2.0, at your option.
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
