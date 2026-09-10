@@ -174,3 +174,36 @@ A selector that closes the distance to 6 needs a measure that separates 13 from
 codopsy reads it through tree-sitter and its coverage on these files ranged from
 0% to 89.8% unparsed. The route to structural quality runs through that parse,
 not through more prompting.
+
+### Correction: the structural numbers above were measured wrong (2026-09-10)
+
+Every cyclomatic figure quoted so far came from codopsy, and codopsy reads
+Almide through tree-sitter. Checking its coverage on the same files shows the
+two numbers the comparison rested on were computed from incomplete parses: the
+file called worst at 40 had 41.8% of it unparsed and three of its functions
+seen, and the stronger model's file scoring 6 had 14.3% unparsed. Codopsy's
+file-level figure is also the maximum over the functions it parsed, not a total,
+so it was never the same measure as a whole-file count.
+
+Gramide parses all eight files completely. Counting decision points per function
+from that parse — every `if`, every `match_arm` past the first of its `match`,
+every loop and guard — gives a measure that is both complete and comparable:
+
+| File | max per function | total |
+|---|---|---|
+| stronger model | 7 | 26 |
+| six cairn runs with a reference | 10, 11, 13, 13, 14, 17 | 33-45 |
+| cairn without a reference | 22 | 65 |
+
+Three claims made earlier are wrong and are corrected here. The spread across
+identical runs is 10 to 17, not 13 to 40, so there is less for a selector to
+exploit than the earlier note claimed. The file singled out as the outlier worth
+rejecting is the second best of the six; a selector built on the earlier reading
+would have discarded it. And the reference did move structural quality — 22 down
+to 10-17 — so the finding is not that structure resists every intervention, but
+that it resisted the two prompting ones while responding to the one that gave
+the model the API it was working against.
+
+The remaining distance is 7 against a median of 13: real, and about half of what
+was reported. The measurement to trust for Almide is the one taken from a parse
+that covers the file.
