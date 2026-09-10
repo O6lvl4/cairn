@@ -57,6 +57,145 @@ now, and every input that works today must still work. If the code is already
 simple, emit no edits and say so.
 """
 
+// Everything the model is asked, in one place: the observation, the files as
+// they are now, what has already been tried, and the question. A polish is not
+// shown the history — it is not continuing a repair, it is restating a result.
+fn edit_prompt(context: String, block: String, history: String, polishing: Bool, verify_command: String) -> String =
+  context + "\n\n=== FILE CONTENTS ===\n" + (if block == "" then "(none could be read)" else block)
+    + (if history != "" and not polishing then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
+    + "\n\n=== QUESTION ===\n" + (if polishing then POLISH_QUESTION else "Fix the problem.")
+    + "\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
+    + (if verify_command != "" then "Success is \"" + verify_command + "\" exiting zero for the right reason.\n" else "")
+    + "Do not weaken, skip or delete tests to achieve it."
+
+let SAME_FAILURE_NOTE = "THE SAME FAILURE AS THE PREVIOUS ATTEMPT. The last change did not move it. Do not adjust the previous approach; replace it — a different algorithm, data structure or control flow. Re-read the failing test's expectation first.\n"
+
+// What the next attempt is told about this one: what it meant to do, what it
+// actually changed, what was refused before it ran, and why it failed. The
+// diff is here because the history once said only the intent and the result,
+// so the next attempt read the file it had just written as if it were the
+// original.
+fn attempt_record(n: Int, edits: List[Edit], explanation: String, diffs: List[String],
+                  rejected: List[Rejected], why: String, repeat_note: String, explanations: String) -> String = {
+  let touched = if list.is_empty(edits) then "(nothing)" else string.join(list.map(edits, (e) => e.path), ", ")
+  let rejection_note = if list.is_empty(rejected) then ""
+    else "rejected before it ran:\n" + string.join(list.map(rejected, (r) => "  " + r.path + ": " + r.why), "\n") + "\n"
+  "\nAttempt " + int.to_string(n) + ": edited " + touched + "\n"
+    + (if explanation != "" then "intent: " + explanation + "\n" else "")
+    + (if list.is_empty(diffs) then "" else "changed:\n" + string.join(diffs, "\n") + "\n")
+    + rejection_note + "result: FAILED\n" + why + "\n" + repeat_note + explanations
+}
+
+// A failing command that names a file nobody read is naming the next thing to
+// read. The set only grows, and only by what the failure actually mentioned.
+effect fn widened(obs: observe.Observation, verify: observe.CommandResult?, paths: List[String], max_files: Int, quiet: Bool) -> Result[List[String], String] = {
+  match verify {
+    none => ok(paths),
+    some(v) => {
+      let hay = v.stdout + "\n" + v.stderr
+      let fresh = list.filter(obs.files, (f) => string.contains(hay, f) and not list.contains(paths, f))
+      if list.is_empty(fresh) then ok(paths)
+      else {
+        note(quiet, "failure names new files: " + string.join(fresh, ", "))!
+        ok(list.take(paths + fresh, max_files + 2))
+      }
+    },
+  }
+}
+
+type Batch = { edits: List[Edit], rejected: List[Rejected] }
+type Applied = { applied: List[Edit], rejected: List[Rejected], diffs: List[String] }
+
+// What to say when every edit came back the wrong shape. The rejection reasons
+// are raw compiler output; the same diagnostic codes are explained for a
+// failing verify command, and an answer refused by the gate is where they are
+// needed most — three measured runs re-asked twice on the same E005 without
+// ever being told what it meant.
+// The diagnostics in `text`, explained, for whichever language this project is.
+// Nothing is said when the toolchain has no explainer or the text holds no code
+// it recognises.
+effect fn explained_diagnostics(obs: observe.Observation, text: String, label: String, quiet: Bool) -> Result[String, String] = {
+  match explain.explainer_for(option.map(obs.fingerprint, (f) => f.language) ?? "") {
+    none => ok(""),
+    some(ex) => {
+      let found = explain.explain(text, ex, obs.root)!
+      if list.is_empty(found) then ok("")
+      else {
+        note(quiet, label + string.join(list.map(found, (f) => f.code), ", "))!
+        ok("\n" + explain.render_explanations(found) + "\n")
+      }
+    },
+  }
+}
+
+effect fn repair_prompt(obs: observe.Observation, rejected: List[Rejected], quiet: Bool) -> Result[String, String] = {
+  let explained = explained_diagnostics(obs, string.join(list.map(rejected, (x) => x.why), "\n"), "explained the rejection: ", quiet)!
+  ok("\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n"
+    + string.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + explained
+    + "\nAnswer again. For each file, `source` is the complete file.")
+}
+
+// The model's answer, turned into edits that may be written and reasons the
+// rest may not. Nothing here touches the disk: a path outside the root, a file
+// that was never shown, a creation that was not allowed and a degenerate write
+// are all refused before the gate ever sees them.
+effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[String], allow_create: Bool, quiet: Bool, into: List[Edit]) -> Result[Batch, String] = {
+  var edits = into
+  var rejected: List[Rejected] = []
+  for v in json.get_array(answer, "edits") ?? [] {
+    match edit_of(v) {
+      none => list.push(rejected, Rejected { path: json.get_string(v, "path") ?? "?", why: "malformed edit" }),
+      some(e0) => {
+        let p = normalize_path(e0.path)
+        let source = unwrap_source(e0.source)
+        let on_disk = fs.exists(obs.root + "/" + p)
+        if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown completely" }); note(quiet, "rejected " + p + ": not among the files it was shown completely")! }
+        else if not on_disk and not allow_create then { list.push(rejected, Rejected { path: p, why: "does not exist (creation not enabled)" }); note(quiet, "rejected " + p + ": does not exist (creation not enabled)")! }
+        else if string.starts_with(p, "/") or string.contains(p, "..") then list.push(rejected, Rejected { path: p, why: "outside the project root" })
+        else {
+          let degenerate = degenerate_write(obs.root, p, source)!
+          if degenerate != "" then {
+            list.push(rejected, Rejected { path: p, why: degenerate })
+            note(quiet, "rejected " + p + ": " + degenerate)!
+            if string.len(source) < 200 then note(quiet, "  " + p + " was: " + string.take(source, 120))! else ()
+          } else {
+            match list.find_index(edits, (x) => x.path == p) {
+              some(i) => { list.push(rejected, Rejected { path: p, why: "named twice in one batch" }); edits = list.remove_at(edits, i) },
+              none => (),
+            }
+            list.push(edits, Edit { path: p, source: source })
+          }
+        }
+      },
+    }
+  }
+  ok(Batch { edits: edits, rejected: rejected })
+}
+
+// One file, one write: the good write lands and the bad one is reported, so a
+// batch is never all-or-nothing on a single bad file.
+effect fn apply_edits(root: String, edits: List[Edit], quiet: Bool) -> Result[Applied, String] = {
+  var applied: List[Edit] = []
+  var rejected: List[Rejected] = []
+  var diffs: List[String] = []
+  for e in edits {
+    let full = root + "/" + e.path
+    let before = fs.read_text(full) ?? ""
+    match gate.write_checked(full, e.source, true) {
+      ok(_) => { list.push(applied, e); list.push(diffs, "--- " + e.path + " ---\n" + unified_diff(before, e.source)) },
+      err(why) => {
+        list.push(rejected, Rejected { path: e.path, why: "refused by the syntax gate: " + why + "; the file begins \"" + first_line(e.source) + "\"" })
+        note(quiet, "apply rejected " + e.path + ": " + why)!
+      },
+    }
+  }
+  if not list.is_empty(applied) then {
+    bump_mtimes(root, list.map(applied, (e) => e.path))!
+    if not quiet then { for e in applied { eprintln("  wrote " + e.path + " (" + int.to_string(string.len(e.source)) + " bytes)") } } else ()
+  } else ()
+  ok(Applied { applied: applied, rejected: rejected, diffs: diffs })
+}
+
 // The files as they stand right now, so a polish that breaks the build can be
 // undone. A file that cannot be read is not snapshotted and not restored.
 effect fn snapshot_of(root: String, paths: List[String]) -> List[(String, String)] = {
@@ -457,12 +596,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       let started_at = env.millis()
       phase(quiet, "edit", if polishing then "polish" else "attempt " + int.to_string(n) + "/" + int.to_string(opts.max_attempts))!
       let (block, read) = render_files(obs.root, paths, quiet)!
-      let prompt = context + "\n\n=== FILE CONTENTS ===\n" + (if block == "" then "(none could be read)" else block)
-        + (if history != "" and not polishing then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
-        + "\n\n=== QUESTION ===\n" + (if polishing then POLISH_QUESTION else "Fix the problem.")
-        + "\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
-        + (if obs.verify_command != "" then "Success is \"" + obs.verify_command + "\" exiting zero for the right reason.\n" else "")
-        + "Do not weaken, skip or delete tests to achieve it."
+      let prompt = edit_prompt(context, block, history, polishing, obs.verify_command)
 
       var edits: List[Edit] = []
       var explanation = ""
@@ -484,24 +618,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
         if round == 1 then {
           if not list.is_empty(edits) or list.is_empty(rejected) or apply_error != "" then stop_rounds = true
           else {
-            // The rejection reasons are raw compiler output. The same
-            // diagnostic codes are explained for a failing verify command, and
-            // an answer rejected by the gate is the place they are needed most:
-            // three measured runs re-asked twice on the same E005 without ever
-            // being told what it meant.
-            let why_text = string.join(list.map(rejected, (x) => x.why), "\n")
-            var gate_explained = ""
-            match explain.explainer_for(option.map(obs.fingerprint, (f) => f.language) ?? "") {
-              some(ex) => {
-                let found = explain.explain(why_text, ex, obs.root)!
-                if not list.is_empty(found) then {
-                  gate_explained = "\n" + explain.render_explanations(found) + "\n"
-                  note(quiet, "explained the rejection: " + string.join(list.map(found, (f) => f.code), ", "))!
-                } else ()
-              },
-              none => (),
-            }
-            repair = "\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n" + string.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + gate_explained + "\nAnswer again. For each file, `source` is the complete file as it should exist on disk, every line, with your change applied."
+            repair = repair_prompt(obs, rejected, quiet)!
             note(quiet, "every edit was rejected for its shape; asking once more with the reasons, same effort")!
             rejected = []
           }
@@ -513,54 +630,15 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
               total_cost = total_cost + a.cost_usd
               note_hedges(quiet, a.hedged, a.hedge_wins)!
               explanation = json.get_string(a.value, "explanation") ?? ""
-              for v in json.get_array(a.value, "edits") ?? [] {
-                match edit_of(v) {
-                  none => list.push(rejected, Rejected { path: json.get_string(v, "path") ?? "?", why: "malformed edit" }),
-                  some(e0) => {
-                    let p = normalize_path(e0.path)
-                    let source = unwrap_source(e0.source)
-                    let on_disk = fs.exists(obs.root + "/" + p)
-                    if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown completely" }); note(quiet, "rejected " + p + ": not among the files it was shown completely")! }
-                    else if not on_disk and not opts.allow_create then { list.push(rejected, Rejected { path: p, why: "does not exist (creation not enabled)" }); note(quiet, "rejected " + p + ": does not exist")! }
-                    else if string.starts_with(p, "/") or string.contains(p, "..") then list.push(rejected, Rejected { path: p, why: "outside the project root" })
-                    else {
-                      let degenerate = degenerate_write(obs.root, p, source)!
-                      if degenerate != "" then {
-                        list.push(rejected, Rejected { path: p, why: degenerate })
-                        note(quiet, "rejected " + p + ": " + degenerate)!
-                        if string.len(source) < 200 then note(quiet, "  " + p + " was: " + string.take(source, 120))! else ()
-                      } else {
-                        match list.find_index(edits, (x) => x.path == p) {
-                          some(i) => { list.push(rejected, Rejected { path: p, why: "named twice in one batch" }); edits = list.remove_at(edits, i) },
-                          none => (),
-                        }
-                        list.push(edits, Edit { path: p, source: source })
-                      }
-                    }
-                  },
-                }
-              }
+              let batch = collect_edits(obs, a.value, read, opts.allow_create, quiet, edits)!
+              edits = batch.edits
+              for r in batch.rejected { list.push(rejected, r) }
             },
           }
-          // One file, one write: the good write lands and the bad one is reported.
-          var applied: List[Edit] = []
-          for e in edits {
-            let full = obs.root + "/" + e.path
-            let before = fs.read_text(full) ?? ""
-            match gate.write_checked(full, e.source, true) {
-              ok(_) => { list.push(applied, e); list.push(diffs, "--- " + e.path + " ---\n" + unified_diff(before, e.source)) },
-              err(why) => {
-                let shape = "refused by the syntax gate: " + why + "; the file begins \"" + first_line(e.source) + "\""
-                list.push(rejected, Rejected { path: e.path, why: shape })
-                note(quiet, "apply rejected " + e.path + ": " + why)!
-              },
-            }
-          }
-          edits = applied
-          if not list.is_empty(applied) then {
-            bump_mtimes(obs.root, list.map(applied, (e) => e.path))!
-            if not quiet then { for e in applied { eprintln("  wrote " + e.path + " (" + int.to_string(string.len(e.source)) + " bytes)") } } else ()
-          } else ()
+          let done = apply_edits(obs.root, edits, quiet)!
+          edits = done.applied
+          for r in done.rejected { list.push(rejected, r) }
+          for d in done.diffs { list.push(diffs, d) }
         } else ()
         round = round + 1
       }
@@ -614,43 +692,22 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       if not finished then {
         let why = if apply_error != "" then apply_error
           else match verify { some(v) => failure_view(obs.verify_command, v.stdout + "\n" + v.stderr, obs.root, 40, quiet)!, none => "unknown" }
-        var explanations = ""
-        match verify {
-          some(v) => match explain.explainer_for(option.map(obs.fingerprint, (f) => f.language) ?? "") {
-            some(ex) => {
-              let found = explain.explain(v.stdout + "\n" + v.stderr, ex, obs.root)!
-              if not list.is_empty(found) then { explanations = "\n" + explain.render_explanations(found) + "\n"; note(quiet, "explained " + string.join(list.map(found, (f) => f.code), ", "))! } else ()
-            },
-            none => (),
-          },
-          none => (),
+        let explanations = match verify {
+          some(v) => explained_diagnostics(obs, v.stdout + "\n" + v.stderr, "explained ", quiet)!,
+          none => "",
         }
-        let rejection_note = if list.is_empty(rejected) then "" else "rejected before it ran:\n" + string.join(list.map(rejected, (r) => "  " + r.path + ": " + r.why), "\n") + "\n"
         var repeat_note = ""
         if apply_error == "" and option.is_some(verify) then {
           let key = failure_key(why)
           if last_failure_key != "" and key == last_failure_key then {
             stuck = stuck + 1
-            repeat_note = "THE SAME FAILURE AS THE PREVIOUS ATTEMPT. The last change did not move it. Do not adjust the previous approach; replace it — a different algorithm, data structure or control flow. Re-read the failing test's expectation first.\n"
+            repeat_note = SAME_FAILURE_NOTE
             note(quiet, "same failure as attempt " + int.to_string(n - 1) + "; escalating one rung and asking for a different approach")!
           } else stuck = 0
           last_failure_key = key
         } else ()
-        history = history + "\nAttempt " + int.to_string(n) + ": edited " + (if list.is_empty(edits) then "(nothing)" else string.join(list.map(edits, (e) => e.path), ", ")) + "\n"
-          + (if explanation != "" then "intent: " + explanation + "\n" else "")
-          + (if list.is_empty(diffs) then "" else "changed:\n" + string.join(diffs, "\n") + "\n")
-          + rejection_note + "result: FAILED\n" + why + "\n" + repeat_note + explanations
-        if n < opts.max_attempts then match verify {
-          some(v) => {
-            let hay = v.stdout + "\n" + v.stderr
-            let fresh = list.filter(obs.files, (f) => string.contains(hay, f) and not list.contains(paths, f))
-            if not list.is_empty(fresh) then {
-              paths = list.take(paths + fresh, opts.max_files + 2)
-              note(quiet, "failure names new files: " + string.join(fresh, ", "))!
-            } else ()
-          },
-          none => (),
-        } else ()
+        history = history + attempt_record(n, edits, explanation, diffs, rejected, why, repeat_note, explanations)
+        if n < opts.max_attempts then paths = widened(obs, verify, paths, opts.max_files, quiet)! else ()
       } else ()
       n = n + 1
     }

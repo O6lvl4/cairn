@@ -210,3 +210,28 @@ the model the API it was working against.
 The remaining distance is 7 against a median of 13: real, and about half of what
 was reported. The measurement to trust for Almide is the one taken from a parse
 that covers the file.
+
+
+### A measure of its own code, and what it found (2026-09-11)
+
+Cairn now has a structural check in `ci/check.sh`. It is codopsy-almd, which
+measures Almide through gramide's parse and declines to grade a file that parse
+did not cover — the failure that made every earlier structural number in this
+document wrong.
+
+Its first run named `solve` at 69 decision points, against 23 for the next worst
+function in this repository and 12 for the worst in hew. Seven seams came out of
+it: turning an answer into edits, applying them through the gate, wording a
+re-ask, explaining diagnostics, widening the read set, recording an attempt, and
+building the prompt. That is 69 down to 45, with the 70 tests unchanged and one
+task solved end to end afterwards in a single attempt for $0.0034.
+
+One of those seams was a duplicate. Explaining the diagnostics of a rejected
+edit had been added to this repository the same day, and the same code already
+existed for a failing verify command a hundred lines away. Nobody noticed until
+something counted the branches.
+
+The remaining 45 is the attempt loop's own state — ten mutable variables that
+would have to become a record — which is a different kind of change from lifting
+out a cohesive block, and is not attempted here. The CI number is a ratchet at
+45: it may fall, and raising it needs a reason written beside it.
