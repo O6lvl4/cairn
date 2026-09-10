@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
-# Almide: a language the model has certainly never seen.
-#
-# Every other benchmark here is contaminated. Python, Go, Rust, C++ and
-# JavaScript are in the training data, and so are the Exercism problems
-# themselves — a model can score well on `hamming` by recalling it. Almide
-# is one person's language, and its exercises live in a private repo.
-# Nothing here can be recalled; it has to be read.
-#
-# So this measures the actual claim of the project. famulus5's premise is
-# that observing beats guessing. If that is true, a cheap model with a
-# 949-line cheatsheet in front of it should be able to write a language it
-# has never met. If it is false, this is where it shows.
+# Almide exercise benchmark. Training-set exposure is unknown; a private or
+# newer language alone does not establish that a task is uncontaminated.
+# This is a development benchmark, not a held-out leaderboard result.
 #
 # The exercises ship with a reference result to compare against:
 # research/benchmark/exercises/BENCHMARK.md records Claude solving 14 of
@@ -18,6 +9,7 @@
 #
 #   ALMIDE=/path/to/almide-repo bench/almide.sh
 #   BENCH_LIMIT=5 BENCH_JOBS=3 bench/almide.sh
+#   BENCH_CHECK_ONLY=1 bench/almide.sh  # validate harness without model calls
 #   bench/almide.sh hamming bob        just these exercises
 
 set -uo pipefail
@@ -30,10 +22,12 @@ WORK="${BENCH_WORK:-${TMPDIR:-/tmp}/cairn-almide}"
 LIMIT="${BENCH_LIMIT:-0}"
 JOBS="${BENCH_JOBS:-3}"
 ATTEMPTS="${BENCH_ATTEMPTS:-6}"
-# BENCH_AGENT=1 runs the tool loop (--agent) instead of the fixed
-# observe-then-edit pass, so the two can be compared on the same problems.
-AGENT="${BENCH_AGENT:-}"
-STEPS="${BENCH_STEPS:-20}"
+# These historical switches were silently ignored by the current cairn CLI.
+# Refuse them so an apparent ablation cannot measure the same mode twice.
+if [ -n "${BENCH_AGENT:-}" ] || [ -n "${BENCH_STEPS:-}" ]; then
+  echo "BENCH_AGENT/BENCH_STEPS are unsupported; use BENCH_ATTEMPTS for cairn's edit/verify loop" >&2
+  exit 2
+fi
 
 command -v almide >/dev/null || { echo "almide not on PATH" >&2; exit 2; }
 [ -d "$EXDIR" ] || { echo "exercises not found at $EXDIR" >&2; exit 2; }
@@ -44,7 +38,7 @@ command -v almide >/dev/null || { echo "almide not on PATH" >&2; exit 2; }
 # The tests are the specification and stay verbatim; every `fn` line is
 # removed along with its body. What is left will not compile — the tests
 # call functions that no longer exist — which is exactly the baseline
-# famulus5 should be reading.
+# cairn should be reading.
 strip_impl() {
   python3 - "$1" "$2" <<'PY'
 import re, sys
@@ -95,24 +89,19 @@ Write these exact signatures, and do not change the test blocks:
 $sigs"
 
   local log="$WORK/$ex.log"
-  local mode=(--attempts "$ATTEMPTS")
-  [ -n "$AGENT" ] && mode=(--agent --steps "$STEPS")
   # `almide test` with no argument needs an almide.toml, which an exercise
   # directory does not have: under 0.62 it exits 1 without running anything.
   # Naming the file is what actually runs the tests.
   local vc="almide test $base"
-  ( "$AGENT_ROOT/cairn" solve "$task" --root "$d" --verify "$vc" "${mode[@]}" ) > "$log" 2>&1
+  ( "$AGENT_ROOT/cairn" solve "$task" --root "$d" --verify "$vc" --attempts "$ATTEMPTS" ) > "$log" 2>&1
 
   local result=FAIL
   if ( cd "$d" && almide test "$base" ) >/dev/null 2>&1; then result=PASS; fi
 
   local cost attempts read_cheat
   cost=$(grep -oE '\$[0-9]+\.[0-9]+' "$log" | tail -1 | tr -d '$'); [ -z "$cost" ] && cost=0
-  if [ -n "$AGENT" ]; then
-    attempts=$(grep -oE 'in [0-9]+ step' "$log" | grep -oE '[0-9]+' | tail -1)
-  else
-    attempts=$(grep -c '^\[edit\]' "$log" 2>/dev/null | tr -d '\n ')
-  fi; [ -z "$attempts" ] && attempts=0
+  attempts=$(grep -c '^\[edit\]' "$log" 2>/dev/null | tr -d '\n ')
+  [ -z "$attempts" ] && attempts=0
   # Did it choose to read the reference? That is the whole thesis, and it
   # is a decision the agent makes, not one the harness makes for it.
   if grep -q 'reading:.*CHEATSHEET' "$log"; then read_cheat=yes; else read_cheat=no; fi
@@ -122,7 +111,7 @@ $sigs"
   printf '%-22s %-6s cheatsheet-read=%s\n' "$ex" "$result" "$read_cheat"
 }
 export -f run_one strip_impl
-export EXDIR CHEAT WORK AGENT_ROOT ATTEMPTS AGENT STEPS
+export EXDIR CHEAT WORK AGENT_ROOT ATTEMPTS
 
 mkdir -p "$WORK"; : > "$WORK/results.tsv"
 
@@ -153,7 +142,9 @@ for mode in original stripped; do
 done
 echo
 
-echo "== running (almide $(almide --version | awk '{print $2}'), $([ -n "$AGENT" ] && echo "agent tool-loop, $STEPS steps" || echo "fixed pass, $ATTEMPTS attempts")) =="
+[ -n "${BENCH_CHECK_ONLY:-}" ] && { echo "(BENCH_CHECK_ONLY set; stopping after the harness check)"; exit 0; }
+
+echo "== running (almide $(almide --version | awk '{print $2}'), $ATTEMPTS attempts) =="
 if [ "$#" -gt 0 ]; then
   exercises=$(printf '%s\n' "$@")
 else
