@@ -185,8 +185,11 @@ seen, and the stronger model's file scoring 6 had 14.3% unparsed. Codopsy's
 file-level figure is also the maximum over the functions it parsed, not a total,
 so it was never the same measure as a whole-file count.
 
-Gramide parses all eight files completely. Counting decision points per function
-from that parse — every `if`, every `match_arm` past the first of its `match`,
+Gramide parses seven of the eight completely and says so: its `symbols` output
+carries a `complete` flag. The eighth — the stronger model's file — trips its
+list pattern `[s, ..rest]` and is recovered with one part skipped, so the 7
+below is measured on a tree missing a two-armed match. Counting decision points
+per function from that parse — every `if`, every `match_arm` past the first of its `match`,
 every loop and guard — gives a measure that is both complete and comparable:
 
 | File | max per function | total |
