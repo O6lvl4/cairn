@@ -102,9 +102,25 @@ an answer of about 5 KB. The instruction was removed. Explaining the rejected
 diagnostic on the re-ask, added while testing this, did not rescue it and was
 kept for its own sake.
 
-Taken together: the harness closes gaps in what the model knows, and does not
-close gaps in what it can do. Structural quality — cyclomatic 18-40 against 6
-for a stronger model on the same task — did not move under either intervention.
+Taken together: the harness closes gaps in what the model knows, and prompting
+does not close gaps in what it can do. Structural quality did not move under
+either intervention.
+
+That is a claim about prompting, not about harnesses, and the same runs argue
+against the wider reading. Six runs of one configuration produced cyclomatic
+13, 15, 18, 18, 24 and 40 — a threefold spread, every one passing the tests and
+scoring 9-10 on the behaviour probes. The model does not write code of a fixed
+structure; it writes a distribution, and a single run samples it. Choosing among
+k samples on a structural measure would land near 13 rather than near the 18-24
+a single sample typically gives, which is roughly two fifths of the distance to
+the 6 a stronger model reached — without a better model, at k times the cost of
+one attempt, which for this task is still under five cents.
+
+Selecting this way has a trap worth stating before anyone builds it: an
+analyzer scores what it can parse, so a candidate it fails to parse looks clean.
+Codopsy graded the worst file in this whole comparison an A on 10.2% of its
+contents. Any selection needs a parse-coverage floor, or it will reliably pick
+the file the analyzer understood least.
 
 **Instrumentation earned more than the features.** Hedged requests looked
 plausible until they reported themselves: three hedges fired, three lost, so the
