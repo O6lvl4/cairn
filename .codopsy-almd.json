@@ -1,0 +1,11 @@
+{
+  "src/ask.almd": 20,
+  "src/envfile.almd": 6,
+  "src/explain.almd": 6,
+  "src/gate.almd": 7,
+  "src/llm.almd": 16,
+  "src/main.almd": 23,
+  "src/observe.almd": 11,
+  "src/reference.almd": 6,
+  "src/solve.almd": 45
+}
