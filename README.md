@@ -51,13 +51,14 @@ Each is optional; a missing binary means the built-in path, never an error.
 ## What the write gate covers
 
 No file lands on disk unless it still parses. In tier order: a checker you configure
-(`CAIRN_CHECK_<EXT>`), then the language's own syntax-only tool, then nothing — and
+(`CAIRN_CHECK_<EXT>`), then gramide for Almide/Go/Rust, then the language's
+own syntax-only tool, then nothing — and
 "nothing" is reported, never assumed.
 
 | language | checked by |
 |---|---|
 | Almide, Go | gramide (or `almide check` / `gofmt -e` when it is absent) |
-| Rust | `rustfmt --emit stdout` — it parses without resolving, so an unresolved `use crate::…` still passes |
+| Rust | gramide, or `rustfmt --edition 2024 --emit stdout` when it is absent; neither resolves imports |
 | Python, Ruby, JavaScript, PHP, Lua, shell, JSON, TOML | the tool each ships |
 | Java, C++, C, C#, Kotlin, Scala, Swift, TypeScript | `gramide balance` — brackets and literals only. Their compilers need the whole project to tell a syntax error from a missing symbol, and a gate that refuses a correct edit is worse than none; this one cannot refuse valid code, and catches the failure that actually happens (a generation that stopped halfway) |
 
