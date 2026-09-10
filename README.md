@@ -62,7 +62,7 @@ model.
 | Tool | What it adds to cairn |
 |---|---|
 | [gramide](https://github.com/O6lvl4/gramide) | Syntax checks for Almide, Go and Rust, plus ranked repository maps |
-| [hew](https://github.com/O6lvl4/hew) | Symbol outlines for navigating large source files |
+| [hew](https://github.com/O6lvl4/hew) | Lossless bounded source reads and parser-backed symbol outlines |
 | [ctxgate](https://github.com/O6lvl4/ctxgate) | Compact summaries of long verification failures |
 
 Install companions separately and put them on `PATH`. cairn uses them when
@@ -118,3 +118,6 @@ CI pins the compiler and Rust versions. See [reproducible checks](ci/README.md).
 ## License
 
 [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+
+Reads expand from 24,000 to at most 96,000 Unicode characters when needed. Files
+still truncated remain read-only context; cairn will not replace them wholesale.

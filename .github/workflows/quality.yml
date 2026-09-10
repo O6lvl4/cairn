@@ -38,3 +38,31 @@ jobs:
         env:
           ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
         run: bash ci/check.sh
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: O6lvl4/gramide
+          ref: 95e57c8ba6012e98b360662f091b8ee88497f4ee
+          path: .ci/gramide
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: O6lvl4/hew
+          ref: 976c9da137f8cf5d1e52026ebdd780522a18027b
+          path: .ci/hew
+          persist-credentials: false
+      - name: Build pinned gramide
+        working-directory: .ci/gramide
+        env:
+          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
+        run: '"$ALMIDE_BIN" build'
+      - name: Build pinned hew
+        working-directory: .ci/hew
+        env:
+          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
+        run: '"$ALMIDE_BIN" build'
+      - name: Real companion integration
+        env:
+          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
+          GRAMIDE_BIN: ${{ github.workspace }}/.ci/gramide/gramide
+          HEW_BIN: ${{ github.workspace }}/.ci/hew/hew
+        run: python3 ci/companions.py

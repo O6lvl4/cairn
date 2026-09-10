@@ -59,7 +59,7 @@ almide build
 | ツール | cairn に加わる機能 |
 |---|---|
 | [gramide](https://github.com/O6lvl4/gramide) | Almide・Go・Rust の構文チェックと、順位付きリポジトリ地図 |
-| [hew](https://github.com/O6lvl4/hew) | 大きなソースファイルを読むためのシンボル一覧 |
+| [hew](https://github.com/O6lvl4/hew) | 元の本文を保つ上限付き読み取りと、パーサを使ったシンボル一覧 |
 | [ctxgate](https://github.com/O6lvl4/ctxgate) | 長い検証ログから失敗の要点をまとめる機能 |
 
 連携ツールは個別にインストールし、`PATH` に置きます。利用できる場合に使い、
@@ -114,3 +114,6 @@ CI ではコンパイラと Rust のバージョンを固定しています。[�
 ## ライセンス
 
 [MIT](LICENSE-MIT) または [Apache-2.0](LICENSE-APACHE) を選べます。
+
+読み取りは必要に応じて 24,000 文字から最大 96,000 文字まで拡張します。
+それでも読み切れないファイルは参照専用とし、全体を置換する編集を拒否します。
