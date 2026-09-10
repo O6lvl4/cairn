@@ -42,3 +42,19 @@ negative syntax corpus automation for gramide, and an externally defined repair
 benchmark for cairn under a fixed model/budget. Run the harness-only checks before
 spending model budget. Existing self-reported exercise scores and historical
 speed measurements are leads to reproduce, not substitutes for these comparisons.
+
+## Structured reading checkpoint
+
+gramide's `symbols` contract now provides
+versioned declaration names, owners and physical line/UTF-8 byte ranges. Hew uses
+it for Almide, Go and Rust and labels heuristic fallbacks. The independent Go AST
+comparison covers 38 reference source files and 551 concrete functions/methods;
+its script and input hashes live in gramide's `docs/symbols.md` evidence.
+
+Cairn consumes `hew read-json` when available, with built-in reads as the fallback.
+Unlike display output, this preserves source, line endings and long lines. The
+initial 24,000-character read expands to at most 96,000 characters when incomplete.
+Files still truncated are context only: the complete-file edit path rejects them.
+This does not yet implement model-selected symbol requests or targeted patch edits
+for files larger than that budget. No repair-success or world-ranking claim follows
+from these integration tests; paid model evaluations were not run.

@@ -238,18 +238,52 @@ fn tail(s: String, n: Int) -> String = {
 
 type Read = { path: String, content: String, truncated: Bool, error: String }
 
-// Read a file for the model, capped, with a truthful truncation notice;
-// never outside the project root.
-effect fn read_for_model(root: String, rel: String, max_bytes: Int) -> Read =
+// hew's machine reader preserves source exactly. An old/malformed provider
+// cannot silently turn a prefix into a complete editable file.
+fn decode_hew_read(raw: String, full: String, rel: String, limit: Int) -> Result[Read, String] = {
+  let j = json.parse(raw)!
+  guard (json.get_int(j, "schema_version") ?? 0) == 1 else err("unsupported read schema")
+  guard (json.get_string(j, "path") ?? "") == full else err("read path mismatch")
+  let content = json.get_string(j, "content") |> option.to_result("missing content")!
+  let complete = json.get_bool(j, "complete") |> option.to_result("missing completeness")!
+  let total = json.get_int(j, "total_chars") |> option.to_result("missing length")!
+  let count = string.len(content)
+  guard count <= limit and total >= count else err("invalid read length")
+  guard complete == (total == count) else err("inconsistent completeness")
+  ok(Read { path: rel, content: content, truncated: not complete, error: "" })
+}
+
+effect fn builtin_read(root: String, rel: String, limit: Int) -> Read = match fs.read_text(root + "/" + rel) {
+  err(e) => Read { path: rel, content: "", truncated: false, error: e },
+  ok(text) => {
+    let truncated = string.len(text) > limit
+    Read { path: rel, content: if truncated then string.take(text, limit) else text, truncated: truncated, error: "" }
+  },
+}
+
+effect fn hew_read(full: String, rel: String, limit: Int) -> Result[Read, String] = {
+  let st = process.exec_status_timeout("hew", ["read-json", full, "--max-chars", int.to_string(limit)], 20000)!
+  guard st.code == 0 else err("hew read failed")
+  decode_hew_read(st.stdout, full, rel, limit)
+}
+
+// Limits count Unicode characters. Path checks precede either reader.
+effect fn read_for_model(root: String, rel: String, max_chars: Int) -> Read = {
   if string.starts_with(rel, "/") or string.contains(rel, "..") then Read { path: rel, content: "", truncated: false, error: "outside the project root" }
   else if fs.is_dir(root + "/" + rel) then Read { path: rel, content: "", truncated: false, error: "is a directory" }
-  else match fs.read_text(root + "/" + rel) {
-    err(e) => Read { path: rel, content: "", truncated: false, error: e },
-    ok(text) => {
-      let truncated = string.len(text) > max_bytes
-      Read { path: rel, content: if truncated then string.take(text, max_bytes) else text, truncated: truncated, error: "" }
-    },
+  else match hew_read(root + "/" + rel, rel, max_chars) {
+    ok(r) => r,
+    err(_) => builtin_read(root, rel, max_chars)!,
   }
+}
+
+test "machine reads require truthful completeness and matching paths" {
+  let raw = "{\"schema_version\":1,\"path\":\"/project/a\",\"complete\":true,\"content\":\"abc\",\"total_chars\":3}"
+  assert(result.is_ok(decode_hew_read(raw, "/project/a", "a", 3)))
+  assert(result.is_err(decode_hew_read(raw, "/project/b", "b", 3)))
+  assert(result.is_err(decode_hew_read(raw, "/project/a", "a", 2)))
+  assert(result.is_err(decode_hew_read(string.replace(raw, "\"total_chars\":3", "\"total_chars\":9"), "/project/a", "a", 3)))
+}
 
 test "noise, harness failures, omitted directories" {
   assert(is_noise("src/__pycache__/x.pyc"))

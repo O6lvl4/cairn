@@ -159,16 +159,20 @@ effect fn render_files(root: String, paths: List[String], quiet: Bool) -> (Strin
   var read: List[String] = []
   let hew = on_path("hew")!
   for p in paths {
-    let r = observe.read_for_model(root, p, 24000)!
+    var r = observe.read_for_model(root, p, 24000)!
+    if r.truncated and r.error == "" then {
+      r = observe.read_for_model(root, p, 96000)!
+      note(quiet, "expanded read of " + p + " (up to 96000 characters)")!
+    } else ()
     if r.error != "" then note(quiet, "rejected " + p + ": " + r.error)!
     else {
-      list.push(read, p)
+      if not r.truncated then list.push(read, p) else note(quiet, "read-only context: " + p + " exceeds the complete-file read budget")!
       var outline = ""
       if hew and (r.truncated or list.len(string.split(r.content, "\n")) > 300) then {
         let o = observe.run("hew outline " + observe.shell_quote(p), root, 20000)!
         if o.code == 0 and string.trim(o.stdout) != "" then outline = "--- " + p + ": outline (hew) ---\n" + string.trim_end(o.stdout) + "\n\n" else ()
       } else ()
-      list.push(chunks, outline + "--- " + p + (if r.truncated then " (TRUNCATED — this is only the first part)" else "") + " ---\n" + r.content)
+      list.push(chunks, outline + "--- " + p + (if r.truncated then " (TRUNCATED, READ-ONLY — incomplete source; do not emit a replacement)" else "") + " ---\n" + r.content)
     }
   }
   (string.join(chunks, "\n\n"), read)
@@ -387,7 +391,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       let (block, read) = render_files(obs.root, paths, quiet)!
       let prompt = context + "\n\n=== FILE CONTENTS ===\n" + (if block == "" then "(none could be read)" else block)
         + (if history != "" then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
-        + "\n\n=== QUESTION ===\nFix the problem.\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown.\n"
+        + "\n\n=== QUESTION ===\nFix the problem.\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
         + (if obs.verify_command != "" then "Success is \"" + obs.verify_command + "\" exiting zero for the right reason.\n" else "")
         + "Do not weaken, skip or delete tests to achieve it."
 
@@ -429,7 +433,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
                     let p = normalize_path(e0.path)
                     let source = unwrap_source(e0.source)
                     let on_disk = fs.exists(obs.root + "/" + p)
-                    if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown" }); note(quiet, "rejected " + p + ": not among the files it was shown")! }
+                    if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown completely" }); note(quiet, "rejected " + p + ": not among the files it was shown completely")! }
                     else if not on_disk and not opts.allow_create then { list.push(rejected, Rejected { path: p, why: "does not exist (creation not enabled)" }); note(quiet, "rejected " + p + ": does not exist")! }
                     else if string.starts_with(p, "/") or string.contains(p, "..") then list.push(rejected, Rejected { path: p, why: "outside the project root" })
                     else {
@@ -573,4 +577,19 @@ test "sources are unwrapped and decoded; failures are keyed without numbers" {
   assert_eq(decode_source("line one\\nline two\\n"), "line one\nline two\n")
   assert_eq(failure_key("took 0.012s at 0x7fff"), "took #s at #")
   assert_eq(budget_after(400000, Rung { effort: "high", strong: false }), (8192, "medium"))
+}
+
+test "expanded reads retain the tail and partial files are not editable" {
+  let root = fs.create_temp_dir("cairn-read-contract")!
+  let medium = "// " + string.repeat("x", 30000) + "\nfn tail_marker() {}\n"
+  fs.write(root + "/medium.rs", medium)!
+  fs.write(root + "/large.rs", "// " + string.repeat("x", 97000) + "\nfn unseen_tail() {}\n")!
+  let (context, editable) = render_files(root, ["medium.rs", "large.rs"], true)!
+  assert(string.contains(context, "fn tail_marker() {}"))
+  assert(list.contains(editable, "medium.rs"))
+  assert(not list.contains(editable, "large.rs"))
+  assert(string.contains(context, "TRUNCATED, READ-ONLY"))
+  let outside = observe.read_for_model(root, "../outside.rs", 10)!
+  assert_eq(outside.error, "outside the project root")
+  fs.remove_all(root)!
 }
