@@ -113,3 +113,19 @@ reported `SOLVED` until the outcome was carried out of the loop. Twenty-eight
 per cent of attempts were spending a whole model call on a rejected edit, which
 was only visible by counting across saved logs. None of these were features; all
 three changed a decision.
+
+### Hedging, measured (2026-09-10)
+
+Three runs of the final configuration solved 3/3 at $0.0078, $0.0111 and
+$0.0106, in 168 s, 146 s and 221 s. Their eight model calls took 25, 26, 29,
+46, 47, 73, 117 and 168 seconds — a median near 46 s and a tail at 117-168 s.
+
+At a 75-second threshold the hedge fired five times across every run recorded
+and won once. The other four were duplicate requests paid for and discarded.
+The threshold is now 120000, above the merely-slow and below the tail, so the
+second request is spent where the first is genuinely not arriving. This is
+tuned on eight calls of one task; it is a starting point, not a constant.
+
+The win rate is only visible because the hedge reports it. Before that, two
+earlier runs containing a 231-second and a 565-second attempt could not be
+told apart from ones where the hedge had rescued them.

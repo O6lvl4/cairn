@@ -253,11 +253,17 @@ fn fold_body(text: String) -> Result[Completion, String] =
   if string.starts_with(string.trim_start(text), "data:") then assemble_stream(text) else parse_completion(text)
 
 // How long one call may run before a second, identical one is started beside
-// it. Measured on this project: comparable calls to the same model returned in
-// 68s and in 244s, so the tail — not the median — is what sets wall time. The
-// hedge costs a second request only on the tail, and the first answer to
-// arrive wins. `CAIRN_HEDGE_MS=0` turns it off.
-effect fn hedge_after_ms() -> Int = int.parse(string.trim(env.get("CAIRN_HEDGE_MS") ?? "")) ?? 75000
+// it. The tail, not the median, is what sets wall time here.
+//
+// The threshold is measured, not guessed. Eight consecutive calls on this
+// project's own task took 25, 26, 29, 46, 47, 73, 117 and 168 seconds: a
+// median near 46s and a tail at 117-168s. At 75000 the hedge fired on the
+// merely-slow as well as the tail and won 1 of 5 across every run recorded —
+// four duplicate requests paid for and discarded to save time once. Since
+// cairn's whole claim is cost, the threshold sits above the merely-slow, so a
+// second request is spent only where the first is genuinely not arriving.
+// `CAIRN_HEDGE_MS=0` turns it off.
+effect fn hedge_after_ms() -> Int = int.parse(string.trim(env.get("CAIRN_HEDGE_MS") ?? "")) ?? 120000
 
 // The wall-clock cap on one request, hedge included. The idle deadline cannot
 // catch the failure that costs the most: a model that keeps talking is never

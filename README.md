@@ -96,7 +96,7 @@ clipped, and the label says they were.
 ## Slow requests
 
 One request may be hedged: if the first has not answered within
-`CAIRN_HEDGE_MS` (default 75000), a second identical one is started and the
+`CAIRN_HEDGE_MS` (default 120000), a second identical one is started and the
 first answer to arrive is used. The run reports how many were hedged and how
 many the hedge actually won, because a hedge that never wins is a second
 request paid for and discarded.
