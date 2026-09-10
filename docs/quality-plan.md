@@ -145,3 +145,32 @@ tuned on eight calls of one task; it is a starting point, not a constant.
 The win rate is only visible because the hedge reports it. Before that, two
 earlier runs containing a 231-second and a 565-second attempt could not be
 told apart from ones where the hedge had rescued them.
+
+### What a structural selector would need (2026-09-10)
+
+Choosing among k samples needs a measure that ranks them. Two were checked
+against each other on the six runs above, whose codopsy cyclomatic values were
+13, 15, 18, 18, 24 and 40, with 6 for the stronger model's file.
+
+Cheap textual proxies do not rank them. Maximum indentation is inverted — the
+best file of the six indents deeper than the worst. Line count is unrelated:
+the shortest cairn file is the second worst. Counting branch keywords gives a
+rank correlation near 0.5, which is the middle of the distribution ordered at
+random.
+
+Counting decision points in gramide's parse tree — every `if`, every
+`match_arm` past the first of its `match`, every loop and guard — is a real
+measure rather than a proxy, and does better at 0.56, but its range across the
+six files is 29 to 37 where codopsy's is 13 to 40. It does not discriminate.
+
+Both measures agree on exactly two things: which file is best and which is
+worst. A selector built on either would reject the outlier reliably and choose
+among the rest close to randomly. Rejecting the 40 alone moves the mean of
+these six from 21.3 to 17.6, which is worth having and is not the same feature
+as choosing the best.
+
+A selector that closes the distance to 6 needs a measure that separates 13 from
+18. For Almide that means an analyzer that parses the language properly —
+codopsy reads it through tree-sitter and its coverage on these files ranged from
+0% to 89.8% unparsed. The route to structural quality runs through that parse,
+not through more prompting.
