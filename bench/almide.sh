@@ -18,14 +18,14 @@ AGENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ALMIDE="${ALMIDE:-$HOME/workspace/github.com/almide/almide}"
 EXDIR="$ALMIDE/research/benchmark/exercises"
 CHEAT="$ALMIDE/docs/CHEATSHEET.md"
-WORK="${BENCH_WORK:-${TMPDIR:-/tmp}/cairn-almide}"
+WORK="${BENCH_WORK:-${TMPDIR:-/tmp}/golemide-almide}"
 LIMIT="${BENCH_LIMIT:-0}"
 JOBS="${BENCH_JOBS:-3}"
 ATTEMPTS="${BENCH_ATTEMPTS:-6}"
-# These historical switches were silently ignored by the current cairn CLI.
+# These historical switches were silently ignored by the current golemide CLI.
 # Refuse them so an apparent ablation cannot measure the same mode twice.
 if [ -n "${BENCH_AGENT:-}" ] || [ -n "${BENCH_STEPS:-}" ]; then
-  echo "BENCH_AGENT/BENCH_STEPS are unsupported; use BENCH_ATTEMPTS for cairn's edit/verify loop" >&2
+  echo "BENCH_AGENT/BENCH_STEPS are unsupported; use BENCH_ATTEMPTS for golemide's edit/verify loop" >&2
   exit 2
 fi
 
@@ -38,7 +38,7 @@ command -v almide >/dev/null || { echo "almide not on PATH" >&2; exit 2; }
 # The tests are the specification and stay verbatim; every `fn` line is
 # removed along with its body. What is left will not compile — the tests
 # call functions that no longer exist — which is exactly the baseline
-# cairn should be reading.
+# golemide should be reading.
 strip_impl() {
   python3 - "$1" "$2" <<'PY'
 import re, sys
@@ -93,7 +93,7 @@ $sigs"
   # directory does not have: under 0.62 it exits 1 without running anything.
   # Naming the file is what actually runs the tests.
   local vc="almide test $base"
-  ( "$AGENT_ROOT/cairn" solve "$task" --root "$d" --verify "$vc" --attempts "$ATTEMPTS" ) > "$log" 2>&1
+  ( "$AGENT_ROOT/golemide" solve "$task" --root "$d" --verify "$vc" --attempts "$ATTEMPTS" ) > "$log" 2>&1
 
   local result=FAIL
   if ( cd "$d" && almide test "$base" ) >/dev/null 2>&1; then result=PASS; fi

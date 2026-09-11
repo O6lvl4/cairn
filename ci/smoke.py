@@ -4,14 +4,14 @@ import os
 import subprocess
 import tempfile
 
-BIN = Path(__file__).resolve().parents[1] / "cairn"
+BIN = Path(__file__).resolve().parents[1] / "golemide"
 
 def run(*args, code=0):
     p = subprocess.run([str(BIN), *map(str, args)], capture_output=True, text=True, timeout=30)
     assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
     return p.stdout
 
-assert "cairn solve" in run("help")
+assert "golemide solve" in run("help")
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     (root / "main.py").write_text("def real():\n    return 1\n")

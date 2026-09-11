@@ -60,7 +60,7 @@ effect fn on_path(bin: String) -> Bool = (observe.run("command -v " + bin, ".", 
 fn is_off(v: String) -> Bool = { let s = string.to_lower(string.trim(v)); s == "off" or s == "none" }
 
 effect fn configured(language: String) -> Reference = {
-  let path = string.trim(env.get("CAIRN_REFERENCE_" + env_key(language)) ?? "")
+  let path = string.trim(env.get("GOLEMIDE_REFERENCE_" + env_key(language)) ?? env.get("CAIRN_REFERENCE_" + env_key(language)) ?? "")
   if path == "" then NONE
   else match fs.read_text(path) {
     ok(t) => if string.trim(t) == "" then NONE else clip(t, path),
@@ -100,7 +100,7 @@ effect fn from_toolchain(root: String, language: String) -> Reference = {
 // Which reference this project gets, in tier order; none is said, not assumed.
 effect fn reference_for(root: String, language: String) -> Reference = {
   if language == "" or language == "unknown" then NONE
-  else if is_off(env.get("CAIRN_REFERENCE_" + env_key(language)) ?? "") then NONE
+  else if is_off(env.get("GOLEMIDE_REFERENCE_" + env_key(language)) ?? env.get("CAIRN_REFERENCE_" + env_key(language)) ?? "") then NONE
   else {
     let c = configured(language)!
     if c.label != "" then c

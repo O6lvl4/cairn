@@ -1,4 +1,4 @@
-# Measuring cairn, gramide and hew together
+# Measuring golemide, gramide and hew together
 
 The objective is better repairs per unit of time and money. Faster parsing and
 smaller reads matter only if they preserve the information needed to make a
@@ -7,7 +7,7 @@ correct edit. None of the results below establishes a world ranking.
 ## First checkpoint: correctness and repeatability (2026-09-10)
 
 All three repositories now have a pinned-compiler CI command (`bash ci/check.sh`).
-Local validation covered cairn's 7 test files, gramide's 9 and hew's 4, plus builds
+Local validation covered golemide's 7 test files, gramide's 9 and hew's 4, plus builds
 and CLI smoke checks. These are file counts, not individual assertion counts.
 
 Hew's comment/literal range regression made a six-line Rust function end at line
@@ -17,7 +17,7 @@ lifetime-versus-character handling were checked against rustc_lexer at
 `0d31508599a7814a7044e9a7a871e3dc5f037753`. Hew remains a heuristic reader, not a
 full parser. The separate hew-lang compiler is not this project's hew tool.
 
-Cairn's Almide benchmark previously passed unsupported `--agent`/`--steps`
+Golemide's Almide benchmark previously passed unsupported `--agent`/`--steps`
 options: those did not select another implementation. The harness now rejects
 those legacy settings and supports `BENCH_CHECK_ONLY=1` to validate its original
 and stripped exercise without a model call. Historical mode comparisons must be
@@ -27,7 +27,7 @@ re-established with actually distinct implementations.
 
 | Component | Primary outcome | Cost and performance | Correctness control |
 |---|---|---|---|
-| cairn | Independently verified repairs / all selected tasks | API cost including failures, wall time, attempts | Original tests retained; reference solutions hidden; setup failures reported separately |
+| golemide | Independently verified repairs / all selected tasks | API cost including failures, wall time, attempts | Original tests retained; reference solutions hidden; setup failures reported separately |
 | gramide | False rejection and false acceptance against reference parsers | Whole-corpus time, bytes/s, peak RSS | Pin language edition and corpus commit; include malformed input and recovery output |
 | hew | Symbol names and exact source ranges; required code retained in selected reads | Returned bytes, latency, peak RSS | Annotated cases plus independent parser ranges; report unsupported constructs |
 | combined | Repairs with gramide + hew versus the same agent without each | Total cost/time at equal model and attempt budget | One tool removed at a time; fixed task set and repeated runs |
@@ -39,7 +39,7 @@ cases must have separate results. Unknown training exposure stays unknown.
 
 Next checkpoints are an independent symbol-range corpus for hew, positive and
 negative syntax corpus automation for gramide, and an externally defined repair
-benchmark for cairn under a fixed model/budget. Run the harness-only checks before
+benchmark for golemide under a fixed model/budget. Run the harness-only checks before
 spending model budget. Existing self-reported exercise scores and historical
 speed measurements are leads to reproduce, not substitutes for these comparisons.
 
@@ -51,7 +51,7 @@ it for Almide, Go and Rust and labels heuristic fallbacks. The independent Go AS
 comparison covers 38 reference source files and 551 concrete functions/methods;
 its script and input hashes live in gramide's `docs/symbols.md` evidence.
 
-Cairn consumes `hew read-json` when available, with built-in reads as the fallback.
+Golemide consumes `hew read-json` when available, with built-in reads as the fallback.
 Unlike display output, this preserves source, line endings and long lines. The
 initial 24,000-character read expands to at most 96,000 characters when incomplete.
 Files still truncated are context only: the complete-file edit path rejects them.
@@ -87,7 +87,7 @@ noise.
 command already passes, for the same behaviour written more simply produced a
 two-byte diff on the first run and a version that failed the tests on the second
 and third. The rollback is sound — the tree came back byte-identical each time —
-so the pass ships behind `--polish` at a default of 0, and as `cairn polish` for
+so the pass ships behind `--polish` at a default of 0, and as `golemide polish` for
 a project that is already green. The command exists mostly so the pass can be
 measured at all; before it, polish could only happen inside a repair.
 
@@ -154,7 +154,7 @@ against each other on the six runs above, whose codopsy cyclomatic values were
 
 Cheap textual proxies do not rank them. Maximum indentation is inverted — the
 best file of the six indents deeper than the worst. Line count is unrelated:
-the shortest cairn file is the second worst. Counting branch keywords gives a
+the shortest golemide file is the second worst. Counting branch keywords gives a
 rank correlation near 0.5, which is the middle of the distribution ordered at
 random.
 
@@ -195,8 +195,8 @@ every loop and guard — gives a measure that is both complete and comparable:
 | File | max per function | total |
 |---|---|---|
 | stronger model | 7 | 26 |
-| six cairn runs with a reference | 10, 11, 13, 13, 14, 17 | 33-45 |
-| cairn without a reference | 22 | 65 |
+| six golemide runs with a reference | 10, 11, 13, 13, 14, 17 | 33-45 |
+| golemide without a reference | 22 | 65 |
 
 Three claims made earlier are wrong and are corrected here. The spread across
 identical runs is 10 to 17, not 13 to 40, so there is less for a selector to
@@ -214,7 +214,7 @@ that covers the file.
 
 ### A measure of its own code, and what it found (2026-09-11)
 
-Cairn now has a structural check in `ci/check.sh`. It is codopsy-almd, which
+Golemide now has a structural check in `ci/check.sh`. It is codopsy-almd, which
 measures Almide through gramide's parse and declines to grade a file that parse
 did not cover — the failure that made every earlier structural number in this
 document wrong.

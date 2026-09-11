@@ -1,18 +1,18 @@
 <p align="center">
-  <img src="docs/images/cairn.png" alt="黒い岩の隙間から金色の光が輝く、石の守り手 Cairn" width="400">
+  <img src="docs/images/golemide.png" alt="黒い岩の隙間から金色の光が輝く、石の守り手 Golemide" width="400">
 </p>
 
-<h1 align="center">cairn</h1>
+<h1 align="center">golemide</h1>
 <p align="center"><strong>まず観察する。確かめながら作る。</strong></p>
 <p align="center">Almide 製のコーディングエージェント。<br>プロジェクトを読み、編集し、テストで確かめる。</p>
 <p align="center">
-  <a href="https://github.com/O6lvl4/cairn/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/cairn/actions/workflows/quality.yml/badge.svg" alt="品質検証 CI"></a>
+  <a href="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml/badge.svg" alt="品質検証 CI"></a>
   · <a href="README.md">English</a>
   · <a href="#使い始める">使い始める</a>
   · <a href="docs/quality-plan.md">品質改善の計画</a>
 </p>
 
-cairn は、リポジトリにある事実を手がかりに動きます。ソースファイル、プロジェクトの設定、
+golemide は、リポジトリにある事実を手がかりに動きます。ソースファイル、プロジェクトの設定、
 コンパイラの診断、テスト結果を読み、必要なファイルを選び、編集を提案します。
 利用できるツールで構文を確認してから書き込み、検証コマンドをもう一度実行します。
 
@@ -25,7 +25,7 @@ Almide をインストールした環境で、このリポジトリをビルド�
 
 ```sh
 almide build
-./cairn observe --root ../project
+./golemide observe --root ../project
 ```
 
 `observe` はモデルを呼ばずにプロジェクトを調べ、検証コマンドを実行します。
@@ -33,18 +33,18 @@ almide build
 `CLOUDFLARE_API_TOKEN` を設定し、タスクを渡します。
 
 ```sh
-./cairn solve "clamp が範囲外の値で失敗する問題を直す" \
+./golemide solve "clamp が範囲外の値で失敗する問題を直す" \
   --root ../project --verify "cargo test" --attempts 6
 ```
 
 `--verify` はプロジェクトに合わせて指定してください。その終了コードが成功を決めます。
-オプションは `./cairn help`、モデルを 1 回呼んで認証を確認するには `./cairn llm-test` を使います。
+オプションは `./golemide help`、モデルを 1 回呼んで認証を確認するには `./golemide llm-test` を使います。
 
-`cairn polish` は、検証コマンドが**既に通っている**プロジェクトに対して、同じ振る舞いを
+`golemide polish` は、検証コマンドが**既に通っている**プロジェクトに対して、同じ振る舞いを
 より単純に書き直すよう求めます。通らなくなった場合は、通っていた版に巻き戻します。
 
 ```sh
-./cairn polish --root ../project --verify "cargo test"
+./golemide polish --root ../project --verify "cargo test"
 ```
 
 ## 観察から、検証済みの編集へ
@@ -63,7 +63,7 @@ almide build
 
 ## 小さな道具を組み合わせる
 
-| ツール | cairn に加わる機能 |
+| ツール | golemide に加わる機能 |
 |---|---|
 | [gramide](https://github.com/O6lvl4/gramide) | Almide・Go・Rust の構文チェックと、順位付きリポジトリ地図 |
 | [hew](https://github.com/O6lvl4/hew) | 元の本文を保つ上限付き読み取りと、パーサを使ったシンボル一覧 |
@@ -76,7 +76,7 @@ almide build
 
 初見の言語を書くモデルは構文を推測し、その推測が高くつきます。このプロジェクトでの実測では、
 失敗した attempt は**すべてコンパイルエラー**で、答えを間違えたものは一度もありませんでした。
-そこで cairn はリファレンスを探して見せます。順序は固定で、どれが答えたかは実行時に出力されます。
+そこで golemide はリファレンスを探して見せます。順序は固定で、どれが答えたかは実行時に出力されます。
 
 | 段 | どこから |
 |---|---|
@@ -152,6 +152,6 @@ CI ではコンパイラと Rust のバージョンを固定しています。[�
 読み取りは必要に応じて 24,000 文字から最大 96,000 文字まで拡張します。
 それでも読み切れないファイルは参照専用とし、全体を置換する編集を拒否します。
 
-Cairn は `gramide languages` の登録情報から `check` 機能を持つ言語を検出します。
+Golemide は `gramide languages` の登録情報から `check` 機能を持つ言語を検出します。
 読み取り専用パッケージは構文ゲートに使いません。プロジェクトの明示設定が優先され、
 既存の代替チェッカーも利用できます。

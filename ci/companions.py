@@ -23,4 +23,4 @@ with tempfile.TemporaryDirectory() as tmp:
  assert 'languages\n' in grammar_trace.read_text()
  calls=trace.read_text()
  assert 'read-json ' in calls and '--max-chars 24000' in calls and '--max-chars 96000' in calls,calls
-print('Real gramide → hew → cairn integration passed; language discovery and both read budgets exercised')
+print('Real gramide → hew → golemide integration passed; language discovery and both read budgets exercised')

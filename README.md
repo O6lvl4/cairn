@@ -1,22 +1,22 @@
 <p align="center">
-  <img src="docs/images/cairn.png" alt="Cairn, a black stone guardian with warm golden light between its rocks" width="400">
+  <img src="docs/images/golemide.png" alt="Golemide, a black stone guardian with warm golden light between its rocks" width="400">
 </p>
 
-<h1 align="center">cairn</h1>
+<h1 align="center">golemide</h1>
 <p align="center"><strong>Observe first. Build with evidence.</strong></p>
 <p align="center">A coding agent written in Almide.<br>Read the project. Make the edit. Run the tests.</p>
 <p align="center">
-  <a href="https://github.com/O6lvl4/cairn/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/cairn/actions/workflows/quality.yml/badge.svg" alt="Quality CI"></a>
+  <a href="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml/badge.svg" alt="Quality CI"></a>
   · <a href="README_ja.md">日本語</a>
   · <a href="#quick-start">Quick start</a>
   · <a href="docs/quality-plan.md">Quality plan</a>
 </p>
 
-cairn works from the evidence in your repository: source files, project markers,
+golemide works from the evidence in your repository: source files, project markers,
 compiler diagnostics and test results. It selects relevant files, proposes edits,
 checks their syntax with available tools, and runs your verification command again.
 
-Built with [Almide](https://github.com/almide/almide), cairn runs as a single native
+Built with [Almide](https://github.com/almide/almide), golemide runs as a single native
 binary. Optional companion tools add syntax trees, structured reads and compact
 failure summaries.
 
@@ -26,28 +26,28 @@ With Almide installed, build from this repository:
 
 ```sh
 almide build
-./cairn observe --root ../project
+./golemide observe --root ../project
 ```
 
 `observe` inspects the project and runs its verification command without asking a
 model. To make edits, set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your
-environment or the target project's `.env`, then give cairn a task:
+environment or the target project's `.env`, then give golemide a task:
 
 ```sh
-./cairn solve "fix clamp for out-of-range values" \
+./golemide solve "fix clamp for out-of-range values" \
   --root ../project --verify "cargo test" --attempts 6
 ```
 
 Choose `--verify` for your project: its exit status decides success. Use
-`./cairn help` for options, or `./cairn llm-test` to check credentials with one model
+`./golemide help` for options, or `./golemide llm-test` to check credentials with one model
 call.
 
-`cairn polish` asks for the same behaviour written more simply, on a project
+`golemide polish` asks for the same behaviour written more simply, on a project
 whose verification command already passes. A polish that stops it passing is
 rolled back to the version that did.
 
 ```sh
-./cairn polish --root ../project --verify "cargo test"
+./golemide polish --root ../project --verify "cargo test"
 ```
 
 ## From observation to a verified edit
@@ -67,20 +67,20 @@ model.
 
 ## Small tools, working together
 
-| Tool | What it adds to cairn |
+| Tool | What it adds to golemide |
 |---|---|
 | [gramide](https://github.com/O6lvl4/gramide) | Syntax checks for Almide, Go and Rust, plus ranked repository maps |
 | [hew](https://github.com/O6lvl4/hew) | Lossless bounded source reads and parser-backed symbol outlines |
 | [ctxgate](https://github.com/O6lvl4/ctxgate) | Compact summaries of long verification failures |
 
-Install companions separately and put them on `PATH`. cairn uses them when
+Install companions separately and put them on `PATH`. golemide uses them when
 available, with built-in fallbacks when they are absent.
 
 ## The language reference
 
 A model writing in a language it has never seen guesses, and the guesses are the
 expensive part: on this project's own measurements every failed attempt was a
-compile error, never a wrong answer. So cairn shows it a reference, found in
+compile error, never a wrong answer. So golemide shows it a reference, found in
 this order and named in the output:
 
 | Tier | Where |
@@ -109,7 +109,7 @@ abandoned and the next attempt is asked for less.
 
 ## Syntax checks before writing
 
-`CAIRN_CHECK_<EXT>` overrides the checker for an extension. Otherwise, cairn uses:
+`CAIRN_CHECK_<EXT>` overrides the checker for an extension. Otherwise, golemide uses:
 
 | Language | Check |
 |---|---|
@@ -160,8 +160,8 @@ CI pins the compiler and Rust versions. See [reproducible checks](ci/README.md).
 [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 
 Reads expand from 24,000 to at most 96,000 Unicode characters when needed. Files
-still truncated remain read-only context; cairn will not replace them wholesale.
+still truncated remain read-only context; golemide will not replace them wholesale.
 
-Cairn discovers grammar-backed checks from `gramide languages` packages with the
+Golemide discovers grammar-backed checks from `gramide languages` packages with the
 `check` capability. Reader-only packages do not qualify as syntax gates. Explicit
 project overrides retain precedence; existing fallback checkers remain available.

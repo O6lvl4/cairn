@@ -260,10 +260,10 @@ fn fold_body(text: String) -> Result[Completion, String] =
 // median near 46s and a tail at 117-168s. At 75000 the hedge fired on the
 // merely-slow as well as the tail and won 1 of 5 across every run recorded —
 // four duplicate requests paid for and discarded to save time once. Since
-// cairn's whole claim is cost, the threshold sits above the merely-slow, so a
+// golemide's whole claim is cost, the threshold sits above the merely-slow, so a
 // second request is spent only where the first is genuinely not arriving.
 // `CAIRN_HEDGE_MS=0` turns it off.
-effect fn hedge_after_ms() -> Int = int.parse(string.trim(env.get("CAIRN_HEDGE_MS") ?? "")) ?? 120000
+effect fn hedge_after_ms() -> Int = int.parse(string.trim(env.get("GOLEMIDE_HEDGE_MS") ?? env.get("CAIRN_HEDGE_MS") ?? "")) ?? 120000
 
 // The wall-clock cap on one request, hedge included. The idle deadline cannot
 // catch the failure that costs the most: a model that keeps talking is never
@@ -278,7 +278,7 @@ effect fn hedge_after_ms() -> Int = int.parse(string.trim(env.get("CAIRN_HEDGE_M
 // narrows it and can never widen it past that hard stop.
 fn effective_deadline(cap: Int, hard: Int) -> Int = if cap > 0 then int.min(cap, hard) else hard
 
-effect fn call_max_ms() -> Int = int.parse(string.trim(env.get("CAIRN_CALL_MAX_MS") ?? "")) ?? 360000
+effect fn call_max_ms() -> Int = int.parse(string.trim(env.get("GOLEMIDE_CALL_MAX_MS") ?? env.get("CAIRN_CALL_MAX_MS") ?? "")) ?? 360000
 
 let POLL_MS = 250
 
@@ -300,12 +300,12 @@ fn call_result(out: String) -> (Int, Int)? = {
 }
 
 effect fn start_call(creds: Credentials, body_path: String) -> Result[Call, String] = {
-  let sse_path = fs.create_temp_file("cairn-sse") |> result.map_err((e) => "temp file: " + e)!
-  let cfg_path = fs.create_temp_file("cairn-cfg") |> result.map_err((e) => "temp file: " + e)!
-  let out_path = fs.create_temp_file("cairn-out") |> result.map_err((e) => "temp file: " + e)!
-  let err_path = fs.create_temp_file("cairn-err") |> result.map_err((e) => "temp file: " + e)!
+  let sse_path = fs.create_temp_file("golemide-sse") |> result.map_err((e) => "temp file: " + e)!
+  let cfg_path = fs.create_temp_file("golemide-cfg") |> result.map_err((e) => "temp file: " + e)!
+  let out_path = fs.create_temp_file("golemide-out") |> result.map_err((e) => "temp file: " + e)!
+  let err_path = fs.create_temp_file("golemide-err") |> result.map_err((e) => "temp file: " + e)!
   fs.write(cfg_path, curl_config(creds, body_path, sse_path)) |> result.map_err((e) => "write config: " + e)!
-  let pid_path = fs.create_temp_file("cairn-pid") |> result.map_err((e) => "temp file: " + e)!
+  let pid_path = fs.create_temp_file("golemide-pid") |> result.map_err((e) => "temp file: " + e)!
   // curl runs in the background so its own pid can be recorded: killing the
   // shell alone would leave the request running as an orphan, still streaming
   // and still billed. `wait` makes $? curl's exit status, not the shell's.
@@ -352,7 +352,7 @@ effect fn is_done(c: Call) -> Bool = option.is_some(call_result(fs.read_text(c.o
 // and the first answer to land is the one used.
 effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
   let t0 = env.millis()
-  let body_path = fs.create_temp_file("cairn-req") |> result.map_err((e) => "temp file: " + e)!
+  let body_path = fs.create_temp_file("golemide-req") |> result.map_err((e) => "temp file: " + e)!
   fs.write(body_path, build_body(req)) |> result.map_err((e) => "write request: " + e)!
   let cap = call_max_ms()!
   let hard = (TOTAL_TIMEOUT_S + 30) * 1000
@@ -432,8 +432,8 @@ test "model ids and the request body" {
 // for it. The property that matters is not which pid dies but that the work
 // stops, so the child here keeps writing and the test watches the writing stop.
 test "discarding a call stops the work it spawned, not only its shell" {
-  let sink = fs.create_temp_file("cairn-test-sink")!
-  let pid_file = fs.create_temp_file("cairn-test-pid")!
+  let sink = fs.create_temp_file("golemide-test-sink")!
+  let pid_file = fs.create_temp_file("golemide-test-pid")!
   let script = "( while true; do echo x >> " + observe.shell_quote(sink) + "; sleep 0.05; done ) & c=$!; echo $c > "
     + observe.shell_quote(pid_file) + "; wait $c"
   let shell_pid = process.spawn("sh", ["-c", script])!
@@ -443,7 +443,7 @@ test "discarding a call stops the work it spawned, not only its shell" {
 
   // `sink` is deliberately not one of the paths discard removes: the child
   // recreates it on the next append, which would hide the very thing measured.
-  let scratch = fs.create_temp_file("cairn-test-scratch")!
+  let scratch = fs.create_temp_file("golemide-test-scratch")!
   discard(Call { pid: shell_pid, sse: scratch, cfg: scratch, out: scratch, err: scratch, pid_file: pid_file })!
   env.sleep_ms(400)
   let just_after = string.len(fs.read_text(sink) ?? "")

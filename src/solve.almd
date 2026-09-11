@@ -267,7 +267,7 @@ effect fn failure_view(command: String, raw: String, root: String, tail_lines: I
   let text = string.trim(raw)
   var summary = ""
   if string.len(text) > 2000 and on_path("ctxgate")! then {
-    match fs.create_temp_file("cairn-out") {
+    match fs.create_temp_file("golemide-out") {
       ok(tmp) => {
         let _ = fs.write(tmp, text)
         let r = observe.run("ctxgate summarize " + observe.shell_quote(if command == "" then "verify" else command) + " < " + observe.shell_quote(tmp), root, 20000)!
@@ -743,7 +743,7 @@ test "sources are unwrapped and decoded; failures are keyed without numbers" {
 }
 
 test "expanded reads retain the tail and partial files are not editable" {
-  let root = fs.create_temp_dir("cairn-read-contract")!
+  let root = fs.create_temp_dir("golemide-read-contract")!
   let medium = "// " + string.repeat("x", 30000) + "\nfn tail_marker() {}\n"
   fs.write(root + "/medium.rs", medium)!
   fs.write(root + "/large.rs", "// " + string.repeat("x", 97000) + "\nfn unseen_tail() {}\n")!
@@ -760,7 +760,7 @@ test "expanded reads retain the tail and partial files are not editable" {
 // The polish pass is only safe if the rollback is: a simplification that stops
 // the verify command must leave the passing files exactly as they were.
 test "a snapshot restores the files it captured, and ignores the ones it could not read" {
-  let root = fs.create_temp_dir("cairn-polish")!
+  let root = fs.create_temp_dir("golemide-polish")!
   fs.write(root + "/kept.almd", "fn passing() -> Int = 1\n")!
   let snap = snapshot_of(root, ["kept.almd", "never-existed.almd"])!
   assert_eq(list.len(snap), 1)
@@ -771,7 +771,7 @@ test "a snapshot restores the files it captured, and ignores the ones it could n
 
 // The header carries the size because the model has to reproduce it exactly.
 test "an editable file is headed with the size a replacement has to match" {
-  let root = fs.create_temp_dir("cairn-header")!
+  let root = fs.create_temp_dir("golemide-header")!
   fs.write(root + "/small.rs", "fn a() {}\nfn b() {}\n")!
   let (context, editable) = render_files(root, ["small.rs"], true)!
   assert(string.contains(context, "3 lines, 20 bytes"))

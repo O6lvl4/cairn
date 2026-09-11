@@ -25,7 +25,7 @@ set -uo pipefail
 
 AGENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POLYGLOT="${POLYGLOT:-$AGENT_ROOT/../polyglot-benchmark}"
-WORK="${BENCH_WORK:-${TMPDIR:-/tmp}/cairn-exercism}"
+WORK="${BENCH_WORK:-${TMPDIR:-/tmp}/golemide-exercism}"
 LIMIT="${BENCH_LIMIT:-0}"
 JOBS="${BENCH_JOBS:-4}"
 ATTEMPTS="${BENCH_ATTEMPTS:-3}"
@@ -179,7 +179,7 @@ $(cat "$d/.docs/instructions.append.md")"
   task="$(printf '%s' "$task" | head -c 6000)"
 
   local log="$WORK/$lang/$ex.log"
-  ( "$AGENT_ROOT/cairn" solve "$task" \
+  ( "$AGENT_ROOT/golemide" solve "$task" \
       --root "$d" --verify "$vc" --attempts "$ATTEMPTS" ) > "$log" 2>&1
 
   # The agent's own verdict is not the verdict. Re-run the suite here —

@@ -102,7 +102,7 @@ fn parse_json(raw: String) -> Result[Value, String] = {
 
 // Raw model traffic, on CAIRN_DEBUG (MENDIDE_DEBUG still works).
 effect fn debug(label: String, body: String) -> Unit =
-  if (env.get("CAIRN_DEBUG") ?? env.get("MENDIDE_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---") else ()
+  if (env.get("GOLEMIDE_DEBUG") ?? env.get("CAIRN_DEBUG") ?? env.get("MENDIDE_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---") else ()
 
 // `hedged`/`hedge_wins` count transport hedges across every retry this ask
 // made, so the caller can say what the second requests actually bought.

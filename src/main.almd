@@ -1,9 +1,9 @@
-// cairn — observe, then act.
+// golemide — observe, then act.
 //
-//   cairn solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
+//   golemide solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
 //                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
-//   cairn observe      [--root DIR] [--verify CMD]
-//   cairn llm-test
+//   golemide observe      [--root DIR] [--verify CMD]
+//   golemide llm-test
 
 import env
 import process
@@ -14,13 +14,13 @@ import self.observe
 import self.solve
 
 let USAGE = """
-cairn — observe, then act
+golemide — observe, then act
 
-  cairn solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
+  golemide solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
                         [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
-  cairn polish [focus]  [--root DIR] [--verify CMD] [--files N] [--model M]
-  cairn observe       [--root DIR] [--verify CMD]
-  cairn llm-test
+  golemide polish [focus]  [--root DIR] [--verify CMD] [--files N] [--model M]
+  golemide observe       [--root DIR] [--verify CMD]
+  golemide llm-test
 
 Options
   --root DIR      project root (default: cwd)
@@ -138,7 +138,7 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
   }
   else if (option.map(obs.baseline, (b) => b.code == 0) ?? false) and not polish_only then { println("\n" + obs.verify_command + " already passes — nothing was changed.\n  If there is work to do here, give a --verify that fails first."); ok(0) }
   else if polish_only and not (option.map(obs.baseline, (b) => b.code == 0) ?? false) then {
-    println("\n" + obs.verify_command + " does not pass — polish only rewrites code that already works.\n  Run `cairn solve` first, or give a --verify that passes.")
+    println("\n" + obs.verify_command + " does not pass — polish only rewrites code that already works.\n  Run `golemide solve` first, or give a --verify that passes.")
     ok(3)
   }
   else {
